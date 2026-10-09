@@ -375,7 +375,10 @@ class helper_plugin_aichat extends Plugin
         [$result, $trace] = $this->lastTurn;
         $this->lastTurn = null;
         try {
-            return $this->getTelemetry()->export($trace, (string)$result['conversationId'], (string)$this->getInfo()['date']);
+            $telemetry = $this->getTelemetry();
+            $status = $telemetry->export($trace, (string)$result['conversationId'], (string)$this->getInfo()['date']);
+            if ($telemetry->log && $status !== 'disabled') $telemetry->log->setExport((string)$result['responseId'], $status);
+            return $status;
         } catch (\Throwable $e) {
             return 'failed';
         }

@@ -210,9 +210,41 @@ class TelemetryTest extends \DokuWikiTest
             return array_shift($responses) ?? ['status' => 200, 'body' => '{}'];
         }, 2, 0, $spool);
         $e2->export($this->trace());
-        $this->assertSame(2, $calls);
+        $this->assertSame(2, $calls, 'current trace + one flushed batch, no retry of the partial batch');
         $this->assertSame(1, $e2->last['flushed']);
         $this->assertSame(0, $spool->count(), 'partially accepted backlog is not resent again');
+        $this->assertSame('sent', $e2->last['result'], 'the current trace itself was fully accepted');
+        $this->assertSame(1, $e2->last['flushed_partial_batches'], 'drop in the flushed batch is surfaced');
+        $this->assertSame(1, $e2->last['flushed_rejected_spans']);
+        $this->assertSame(['partial_batches' => 1, 'rejected_spans' => 1], $e2->flushStats);
+        // a later clean flush resets the counters
+        $e2->flush();
+        $this->assertSame(['partial_batches' => 0, 'rejected_spans' => 0], $e2->flushStats);
+    }
+
+    public function testFlushedPartialDropsAreReportedInTurnStatus()
+    {
+        $meta = sys_get_temp_dir() . '/aichat_fp_' . bin2hex(random_bytes(4));
+        $conf = ['telemetry' => 'langfuse', 'telemetry_endpoint' => 'https://lf.example.invalid',
+            'telemetry_langfuse_public' => 'pk', 'telemetry_langfuse_secret' => 'sk', 'telemetry_retries' => 0];
+        $replies = [503,
+            ['status' => 200, 'body' => '{}'],
+            ['status' => 200, 'body' => '{"partialSuccess":{"rejectedSpans":"4","errorMessage":"SECRET-ECHO"}}']];
+        $http = function () use (&$replies) { return array_shift($replies) ?? 200; };
+        $run = function () use ($conf, $meta, $http) {
+            $tt = new \dokuwiki\plugin\aichat\Telemetry\TurnTelemetry($conf, $meta, $http);
+            $t = $tt->newRecorder();
+            $t->finish();
+            return $tt->export($t, 'c', 'r');
+        };
+        try {
+            $this->assertSame('spooled', $run());
+            $status = $run();
+            $this->assertSame('sent;flushed_partial=1:rejected=4', $status);
+            $this->assertStringNotContainsString('SECRET-ECHO', $status);
+        } finally {
+            exec('rm -rf ' . escapeshellarg($meta));
+        }
     }
 
     public function testLegacyIntTransportStillSupported()

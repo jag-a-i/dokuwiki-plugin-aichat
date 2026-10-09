@@ -33,6 +33,8 @@ class OtlpHttpExporter implements ExporterInterface
     protected string $lastBody = '';
     /** @var array sanitized OTLP partial success info of the last accepted request */
     public array $lastAcceptance = [];
+    /** @var array counts from the last flush(): partially accepted spooled batches and their rejected spans */
+    public array $flushStats = ['partial_batches' => 0, 'rejected_spans' => 0];
 
     public function __construct(string $url, array $headers, callable $http, int $timeout = 2, int $retries = 1, ?Spool $spool = null)
     {
@@ -63,6 +65,10 @@ class OtlpHttpExporter implements ExporterInterface
             if ($acceptance['partial']) $this->last['rejected_spans'] = $acceptance['rejected_spans'];
             if ($acceptance['response'] !== 'ok') $this->last['response'] = $acceptance['response'];
             $this->last['flushed'] = $this->flush();
+            if ($this->flushStats['partial_batches'] > 0) {
+                $this->last['flushed_partial_batches'] = $this->flushStats['partial_batches'];
+                $this->last['flushed_rejected_spans'] = $this->flushStats['rejected_spans'];
+            }
             return true; // accepted (fully or partially): never resent, a retry would duplicate accepted spans
         }
         $spooled = $this->spool ? $this->spool->push($payload) : false;
@@ -74,6 +80,7 @@ class OtlpHttpExporter implements ExporterInterface
     /** send up to FLUSH_PER_EXPORT spooled payloads; stops at the first failure */
     public function flush(int $max = self::FLUSH_PER_EXPORT): int
     {
+        $this->flushStats = ['partial_batches' => 0, 'rejected_spans' => 0];
         if (!$this->spool) return 0;
         $sent = 0;
         foreach ($this->spool->oldest($max) as $file) {
@@ -81,6 +88,10 @@ class OtlpHttpExporter implements ExporterInterface
             if ($payload === null) continue;
             if (!$this->send($payload, 0)) break;
             $this->spool->remove($file); // also on partial success: no resend of accepted spans
+            if ($this->lastAcceptance['partial'] ?? false) {
+                $this->flushStats['partial_batches']++;
+                $this->flushStats['rejected_spans'] += (int)$this->lastAcceptance['rejected_spans'];
+            }
             $sent++;
         }
         return $sent;

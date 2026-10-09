@@ -189,6 +189,7 @@ class FeedbackTest extends \DokuWikiTest
         }
         $rec = $this->record($r['meta']['responseId']);
         $this->assertSame($spans[0]['traceId'], $rec['trace_id'], 'local record links to the trace');
+        $this->assertSame('sent', $rec['export'], 'sanitized export status recorded locally');
     }
 
     public function testClarifyAndFollowupSpansExported()

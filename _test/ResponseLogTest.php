@@ -86,6 +86,22 @@ class ResponseLogTest extends \DokuWikiTest
         $this->assertFileExists("$this->dir/$new.json");
     }
 
+    public function testExportStatusIsStoredSanitized()
+    {
+        $id = str_repeat('9', 24);
+        $log = $this->log();
+        $log->record(['id' => $id, 'owner' => 'o', 'outcome' => 'ANSWER']);
+        $this->assertTrue($log->setExport($id, 'sent;flushed_partial=1:rejected=4'));
+        $this->assertSame('sent;flushed_partial=1:rejected=4', $log->get($id)['export']);
+        $this->assertTrue($log->setExport($id, 'partial:rejected=2'));
+        foreach (['partial: attr too long SECRET', 'sent<script>', str_repeat('a', 9) . ':rejected=1234567890'] as $bad) {
+            $this->assertFalse($log->setExport($id, $bad), $bad);
+        }
+        $this->assertSame('partial:rejected=2', $log->get($id)['export']);
+        $this->assertFalse($log->setExport(str_repeat('8', 24), 'sent'), 'unknown id creates nothing');
+        $this->assertFileDoesNotExist($this->dir . '/' . str_repeat('8', 24) . '.json');
+    }
+
     public function testStorageFailureNeverThrows()
     {
         $file = sys_get_temp_dir() . '/aichat_not_a_dir_' . bin2hex(random_bytes(3));

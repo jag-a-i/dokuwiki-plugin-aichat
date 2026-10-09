@@ -128,7 +128,15 @@ class TurnTelemetry
             if (!$exporter) return 'not_configured';
             $data = $trace->toArray() + ['sessionId' => $sessionId, 'release' => $release];
             $ok = $exporter->export($data);
-            if ($exporter instanceof OtlpHttpExporter) return $exporter->last['result'] ?? ($ok ? 'sent' : 'failed');
+            if ($exporter instanceof OtlpHttpExporter) {
+                $l = $exporter->last;
+                $status = $l['result'] ?? ($ok ? 'sent' : 'failed');
+                if ($status === 'partial') $status .= ':rejected=' . (int)$l['rejected_spans'];
+                if (!empty($l['flushed_partial_batches'])) {
+                    $status .= ';flushed_partial=' . (int)$l['flushed_partial_batches'] . ':rejected=' . (int)$l['flushed_rejected_spans'];
+                }
+                return $status; // sanitized counts only, never the server message
+            }
             return $ok ? 'sent' : 'failed';
         } catch (\Throwable $e) {
             return 'failed';

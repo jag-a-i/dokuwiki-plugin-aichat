@@ -140,7 +140,10 @@ the installed production revision and settings are unknown. Tested only in a san
   recorded as `result=partial` with the rejected count; the batch is not retried or spooled (that would
   duplicate the accepted spans). The server's `errorMessage` is not stored. Empty or non-JSON 2xx
   bodies count as accepted but are flagged (`response=empty|malformed`); the preflight reports partial
-  acceptance as a failure. Responses are read up to 64 KB.
+  acceptance as a failure. Responses are read up to 64 KB. Drops are reported: the local response
+  record gets a sanitized `export` status such as `partial:rejected=2` (current trace) or
+  `sent;flushed_partial=1:rejected=4` (partially accepted spooled batches re-sent in that request);
+  partially accepted batches are never retried.
 - Spool provenance: the namespace is a one-way hash of backend, endpoint URL, credential identity and
   capture policy (no URL or key in clear text on disk). The URL used is the EXACT effective request
   URL of the selected backend (the same function builds the exporter's URL): Langfuse base URLs share a

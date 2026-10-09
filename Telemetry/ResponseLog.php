@@ -114,6 +114,34 @@ class ResponseLog
         }
     }
 
+    /**
+     * Store the sanitized export status of a response (e.g. "sent", "partial:rejected=2",
+     * "sent;flushed_partial=1:rejected=4"). Only a fixed character set is accepted, so no server
+     * message or other content can be stored.
+     */
+    public function setExport(string $id, string $status): bool
+    {
+        if (!self::isValidId($id) || !preg_match('/^[a-z_]+(:rejected=\d{1,9})?(;flushed_partial=\d{1,9}:rejected=\d{1,9})?$/', $status)) {
+            return false;
+        }
+        $file = $this->file($id);
+        $fh = @fopen($file, 'r+');
+        if (!$fh) return false;
+        try {
+            if (!flock($fh, LOCK_EX)) return false;
+            $rec = json_decode((string)stream_get_contents($fh), true);
+            if (!is_array($rec)) return false;
+            $rec['export'] = $status;
+            ftruncate($fh, 0);
+            rewind($fh);
+            fwrite($fh, json_encode($rec));
+            return true;
+        } finally {
+            flock($fh, LOCK_UN);
+            fclose($fh);
+        }
+    }
+
     /** @return array[] records newer than $since (unix time) */
     public function since(int $since): array
     {
