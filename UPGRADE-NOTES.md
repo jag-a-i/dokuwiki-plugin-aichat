@@ -127,6 +127,10 @@ the installed production revision and settings are unknown. Tested only in a san
   `telemetry_spool_max` files, `telemetry_spool_days` days) and up to 2 are re-sent after the next
   successful export. Export runs after the answer was sent (`fastcgi_finish_request` under FPM);
   with mod_php the request still finishes the export before the worker is freed.
+- Redirects are never followed (security): DokuWiki's HTTP client would otherwise re-send the
+  Authorization header and, for 307/308, the trace body to whatever host a redirect names
+  (including http:// downgrades). Any 3xx is a non-retryable failure; only http(s) endpoint URLs are
+  accepted. Configure the final endpoint URL directly (no redirecting proxies or http->https redirects).
 - Other backends: `ExporterFactory::register('name', fn($conf, $http, $spool) => new MyExporter())`
   with an `ExporterInterface` implementation; no chat code changes needed. `otlp` targets any
   OpenTelemetry collector.

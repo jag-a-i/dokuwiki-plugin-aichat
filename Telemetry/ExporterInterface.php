@@ -5,6 +5,8 @@ namespace dokuwiki\plugin\aichat\Telemetry;
 /**
  * A trace export backend. Implementations must be bounded (timeouts, retries) and must not
  * throw for transport problems; they return false instead. Chat logic never depends on them.
+ * Implementations must NOT follow HTTP redirects: credentials and trace payloads may only be
+ * sent to the configured endpoint.
  */
 interface ExporterInterface
 {

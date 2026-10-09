@@ -5,6 +5,13 @@ Scope: everything changed since `dd5f504`. Independent review rounds found 7 def
 session overwrite/token reuse, unauthorized labels after rejection, uncertain negatives selecting
 an option); all fixed with regression tests that fail on the earlier code.
 
+Independent review of 1d08dc4 (release-blocking, FIXED): the telemetry transport left DokuWiki's
+auto-redirect on, so a 301/302/303/307/308 from the endpoint would re-send the Langfuse Basic secret /
+OTLP Authorization header (and for 307/308 the trace body) to any Location host, including http://.
+Now `max_redirect = 0`, non-http(s) URLs refused, 3xx fails closed without retry. Regression: real local
+two-server test (redirect receiver gets no request) for all five codes on both backends plus an
+https->http downgrade; 12 of 13 cases fail on the previous code.
+
 Findings of this pass:
 - FIXED: remote `similar` sent the query unredacted to the embedding endpoint (`ask` already redacted).
 - FIXED (packaging): upstream `.gitattributes` export-ignores `_test/`; earlier checkpoint zips made with

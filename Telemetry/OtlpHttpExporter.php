@@ -24,6 +24,8 @@ class OtlpHttpExporter implements ExporterInterface
     protected ?Spool $spool;
     /** @var array diagnostic of the last export, for tests and the local log */
     public array $last = [];
+    /** HTTP status of the last attempt (0 = transport error) */
+    public int $lastStatus = 0;
 
     public function __construct(string $url, array $headers, callable $http, int $timeout = 2, int $retries = 1, ?Spool $spool = null)
     {
@@ -54,6 +56,7 @@ class OtlpHttpExporter implements ExporterInterface
         }
         $spooled = $this->spool ? $this->spool->push($payload) : false;
         $this->last = ['result' => $spooled ? 'spooled' : 'dropped'];
+        if ($this->lastStatus >= 300 && $this->lastStatus < 400) $this->last['reason'] = 'redirect_refused';
         return $spooled;
     }
 
@@ -82,7 +85,10 @@ class OtlpHttpExporter implements ExporterInterface
             } catch (\Throwable $e) {
                 $status = 0;
             }
+            $this->lastStatus = $status;
             if ($status >= 200 && $status < 300) return true;
+            // redirects are never followed (credentials/body must not reach other hosts): fail closed
+            if ($status >= 300 && $status < 400) return false;
             if ($status >= 400 && $status < 500 && $status !== 429) return false; // not retryable
         }
         return false;

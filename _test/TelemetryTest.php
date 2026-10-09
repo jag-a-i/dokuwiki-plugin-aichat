@@ -148,6 +148,25 @@ class TelemetryTest extends \DokuWikiTest
         $this->assertCount(4, $this->sent);
     }
 
+    public function testRedirectFailsClosedNotRetriedAndSpoolStaysBounded()
+    {
+        $spool = new Spool($this->spoolDir, 2);
+        $e = LangfuseExporter::create('https://lf.example.invalid', 'pk', 'sk', $this->http(), 2, 2, $spool);
+        foreach ([307, 308, 301] as $code) {
+            $this->statuses = [$code];
+            $before = count($this->sent);
+            $e->export($this->trace());
+            $this->assertCount($before + 1, $this->sent, "$code not retried");
+            $this->assertSame('redirect_refused', $e->last['reason']);
+        }
+        $this->assertSame(2, $spool->count(), 'spool bounded');
+        // flushing stops at the first refused redirect instead of looping
+        $this->statuses = [200, 302];
+        $e->export($this->trace());
+        $this->assertSame(['result' => 'sent', 'flushed' => 0], $e->last);
+        $this->assertSame(2, $spool->count());
+    }
+
     public function testClientErrorIsNotRetried()
     {
         $e = LangfuseExporter::create('https://lf.example.invalid', 'pk', 'sk', $this->http(), 2, 2, new Spool($this->spoolDir, 5));

@@ -40,6 +40,10 @@ mk it/hr/password $'====== HR portal password ======\nHR password change procedu
 mk kitchen/coffee $'====== Coffee machine ======\nThe coffee machine is descaled every Friday.'
 printf '====== Synthetic Test Wiki ======\n<aichat>Hello from the synthetic test wiki</aichat>\n' > "$SITE/data/pages/start.txt"
 
+# refuse to run against stale servers from an earlier run (they would silently receive the traffic)
+for port in 8088 8099; do
+  if php -r "exit(@fsockopen('127.0.0.1', $port) ? 0 : 1);"; then echo "port $port already in use - stop the old server first" >&2; exit 3; fi
+done
 : > "$WORK/requests.jsonl"   # fresh request log per run
 python3 "$HERE/mock_llm.py" 8099 "$WORK/requests.jsonl" & MOCK=$!
 php -S 127.0.0.1:8088 -t "$SITE" > "$WORK/php.log" 2>&1 & PHPSRV=$!
