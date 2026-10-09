@@ -30,11 +30,13 @@ class FollowupResolver
     /**
      * @param string $reply the (redacted) user reply
      * @param array $options [['label'=>..., 'pages'=>[...]], ...]
-     * @return array ['type'=>string, 'index'=>int|null, 'rejected'=>int[], 'remainder'=>string]
+     * @return array ['type'=>string, 'index'=>int|null, 'rejected'=>int[], 'remainder'=>string, 'uncertain'=>bool]
+     *         uncertain: REJECT derived from the conservative negative-cue fallback, not an explicit "not X"
      */
     public function resolve(string $reply, array $options): array
     {
-        return array_merge(['index' => null, 'rejected' => [], 'remainder' => ''], $this->classify($reply, $options));
+        return array_merge(['index' => null, 'rejected' => [], 'remainder' => '', 'uncertain' => false],
+            $this->classify($reply, $options));
     }
 
     protected function classify(string $reply, array $options): array
@@ -67,6 +69,19 @@ class FollowupResolver
             if (count($positive) === 1) return ['type' => self::CHOICE, 'index' => $positive[0]];
             if (!$positive) return ['type' => self::REJECT, 'rejected' => $negated, 'remainder' => $remainder];
             return ['type' => self::FREETEXT];
+        }
+
+        // Conservative fallback: a negative/corrective word anywhere ("I don't mean VPN", "VPN is not it",
+        // "VPN was wrong") together with an option name is NEVER read as choosing that option. The
+        // mentioned options are treated as possibly rejected; the user is asked again or the text is
+        // searched without them. Wrongly rejecting only costs one more question; wrongly selecting
+        // would answer the wrong procedure.
+        if ($this->hasNegativeCue($r)) {
+            $mentioned = $this->mentionedIndexes($r, $options);
+            if ($mentioned) {
+                return ['type' => self::REJECT, 'rejected' => $mentioned, 'uncertain' => true,
+                    'remainder' => $this->stripForRemainder($r, $options)];
+            }
         }
 
         // exact label match first (handles clicked buttons, which send the label)
@@ -177,6 +192,53 @@ class FollowupResolver
         );
     }
 
+    /** negation or correction cue anywhere in the (normalized) reply */
+    protected function hasNegativeCue(string $r): bool
+    {
+        return (bool)preg_match(
+            "/(^|\\s)(not|no|never|nope|neither|nor|wrong|incorrect|isn't|isnt|aren't|arent|wasn't|wasnt|" .
+            "don't|dont|doesn't|doesnt|didn't|didnt|won't|can't|cannot|nicht|kein|keine|falsch)(\\s|$)|n't(\\s|$)/u",
+            $r
+        );
+    }
+
+    /** @return int[] indexes of options whose (longest-first) name occurs in the reply */
+    protected function mentionedIndexes(string $r, array $options): array
+    {
+        $labels = [];
+        foreach ($options as $i => $opt) {
+            $l = $this->norm($opt['label']);
+            if ($l !== '') $labels[$i] = $l;
+        }
+        uasort($labels, static fn($a, $b) => mb_strlen($b) <=> mb_strlen($a));
+        $text = ' ' . $r . ' ';
+        $out = [];
+        foreach ($labels as $i => $l) {
+            $lp = '/\s' . preg_quote($l, '/') . '(?=\s)/u';
+            if (preg_match($lp, $text)) {
+                $out[] = $i;
+                $text = preg_replace($lp, ' ', $text);
+            }
+        }
+        sort($out);
+        return $out;
+    }
+
+    /** what is left of a corrective reply after removing option names, cue words and filler */
+    protected function stripForRemainder(string $r, array $options): string
+    {
+        $text = ' ' . $r . ' ';
+        foreach ($options as $opt) {
+            $l = $this->norm($opt['label']);
+            if ($l !== '') $text = preg_replace('/\s' . preg_quote($l, '/') . '(?=\s)/u', ' ', $text);
+        }
+        $words = array_filter(explode(' ', trim(preg_replace('/\s+/', ' ', $text))), function ($w) {
+            return $w !== '' && !preg_match(self::FILLER, $w) && !$this->hasNegativeCue($w)
+                && !preg_match("/^(don|doesn|didn|isn|wasn|aren|t|mean|meant|want|wanted|one|right|correct|thing|account|system)$/", $w);
+        });
+        return implode(' ', $words);
+    }
+
     protected function mentionsLabel(string $r, array $options): bool
     {
         foreach ($options as $opt) {
@@ -199,6 +261,7 @@ class FollowupResolver
     protected function norm(string $s): string
     {
         $s = mb_strtolower($s);
+        $s = str_replace(["\u{2019}", "\u{2018}", '`', "\u{00B4}"], "'", $s); // curly apostrophes
         $s = preg_replace('/[^\p{L}\p{N}#.\']+/u', ' ', $s);
         $s = preg_replace('/(?<!\d)\.|\.(?!\d)/', ' ', $s); // drop sentence dots, keep "1.5"
         return trim(preg_replace('/\s+/', ' ', $s));

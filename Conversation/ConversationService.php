@@ -179,6 +179,11 @@ class ConversationService
                 foreach ($pending['options'] as $i => $opt) {
                     if (!isset($rejected[$i])) $remaining[] = $opt;
                 }
+                if ($res['remainder'] !== '' && $res['uncertain']) {
+                    // uncertain corrective sentence with more content: plain free-text search of the full
+                    // reply (the model sees the negation), never scoped to any offered option
+                    return $this->freetext($need, $reply, $reply, $conversation, $correlation, $redacted, $rounds, []);
+                }
                 if ($res['remainder'] !== '') {
                     // "not VPN, my personal account": search again for what the user described,
                     // without evidence that only supports the rejected options

@@ -65,6 +65,12 @@ the installed production revision and settings are unknown. Tested only in a san
   again (or a generic question if none remain). With a correction ("not VPN, my personal
   account") the described text is searched again, excluding pages that only support rejected
   options. "the CRM one, not VPN" selects CRM. "No. 2" (with a dot) means number 2.
+- Conservative fallback: any negative/corrective word (not, don't, isn't, wrong, never, nicht, ...)
+  together with an option name is never read as choosing that option ("I don't mean VPN",
+  "VPN is not it", "VPN was wrong"). With nothing else in the reply the remaining (re-authorized)
+  options are offered again; with more text the full reply is searched as free text, never scoped
+  to an offered option. A rare wrong rejection ("VPN, I never use the others") costs one more
+  question instead of answering a wrong procedure. Curly apostrophes are normalized.
 - Detection is English/German keyword based (not, no, isn't, without, except, instead of,
   rather than, neither/nor, nicht, kein). Remaining options are re-authorized before they are shown
   again: each option's pages are fetched with the current read ACL; options without a readable page

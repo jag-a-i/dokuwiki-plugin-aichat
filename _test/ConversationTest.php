@@ -312,6 +312,55 @@ class ConversationTest extends \DokuWikiTest
         foreach (['CRM', 'E-Mail'] as $label) $this->assertStringNotContainsString($label, json_encode($r2));
     }
 
+    // recheck detail: revoked E-Mail absent from the response AND the newly stored pending state
+    public function testRejectionDropsRevokedEmailFromResponseAndStoredState()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        $this->wiki->deny['it:email:password'] = ['alice'];
+        $this->wiki->deny['it:email:password-webmail'] = ['alice'];
+        $fetchedBefore = count($this->wiki->fetched);
+        $r2 = $this->ask('not VPN', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertGreaterThan($fetchedBefore, count($this->wiki->fetched), 'pages were re-fetched with current ACL');
+        $this->assertSame(['CRM'], $r2['options']);
+        $this->assertStringNotContainsString('E-Mail', json_encode($r2));
+        $stored = $this->session['tabAAAAAAAA'];
+        $this->assertSame($r2['pendingId'], $stored['id']);
+        $this->assertSame([['label' => 'CRM', 'pages' => ['it:crm:password']]], $stored['options']);
+        $this->assertStringNotContainsString('E-Mail', json_encode($stored['options']));
+        $this->assertStringNotContainsString('it:email', json_encode($stored));
+    }
+
+    // P2: uncertain negative/corrective sentences never select or scope to the mentioned option
+    public function provideUncertainNegatives(): array
+    {
+        return [["I don't mean VPN"], ["I don\u{2019}t mean VPN"], ['VPN is not it'], ["VPN isn\u{2019}t the one"], ['VPN was wrong']];
+    }
+
+    /** @dataProvider provideUncertainNegatives */
+    public function testUncertainNegativeNeverSelectsOption(string $reply)
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        $calls = count($this->chat->calls);
+        $r2 = $this->ask($reply, 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertNotSame(Outcome::ANSWER, $r2['outcome']);
+        $this->assertNotContains('VPN', $r2['options']);
+        $this->assertCount($calls, $this->chat->calls, 'no VPN-scoped model request');
+        $this->assertStringNotContainsString('vpnctl', json_encode($r2));
+    }
+
+    public function testUncertainNegativeWithMoreTextIsPlainFreeText()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: NO_INFORMATION");
+        $r = $this->ask('How do I change my password?');
+        $this->ask("I don\u{2019}t mean VPN but my laptop login", 'tabAAAAAAAA', $r['pendingId']);
+        $prompt = $this->chat->lastPrompt();
+        $this->assertStringContainsString("(I don\u{2019}t mean VPN but my laptop login)", $prompt, 'full reply, negation visible to the model');
+        $this->assertStringContainsString('CLARIFY:allowed', $prompt, 'not a forced scoped answer');
+        $this->assertStringNotContainsString('(VPN)', $prompt, 'never a VPN choice request');
+    }
+
     public function testRejectionWithoutPageFetcherShowsNoStoredLabels()
     {
         $this->chat->queue(self::CLARIFY_REPLY);
