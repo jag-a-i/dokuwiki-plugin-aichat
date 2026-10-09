@@ -66,7 +66,10 @@ the installed production revision and settings are unknown. Tested only in a san
   account") the described text is searched again, excluding pages that only support rejected
   options. "the CRM one, not VPN" selects CRM. "No. 2" (with a dot) means number 2.
 - Detection is English/German keyword based (not, no, isn't, without, except, instead of,
-  rather than, neither/nor, nicht, kein). Other phrasings of rejection may be read as free text,
+  rather than, neither/nor, nicht, kein). Remaining options are re-authorized before they are shown
+  again: each option's pages are fetched with the current read ACL; options without a readable page
+  are dropped and stored pages are reduced to readable ones. If none remains, a generic question is
+  asked without a menu. Other phrasings of rejection may be read as free text,
   which is searched again rather than guessed.
 
 ## Browser end-to-end test

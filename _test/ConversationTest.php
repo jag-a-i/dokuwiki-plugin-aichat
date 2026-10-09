@@ -274,6 +274,55 @@ class ConversationTest extends \DokuWikiTest
         $this->assertSame(['it:crm:password'], array_map(fn($c) => $c->getPage(), $r3['sources']));
     }
 
+    // recheck finding: options re-offered after a rejection are re-authorized
+    public function testRejectionDropsOptionsRevokedSinceClarification()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        $this->assertSame(['E-Mail', 'VPN', 'CRM'], $r['options']);
+        $callsBeforeRevoke = count($this->chat->calls);
+        $this->wiki->deny['it:crm:password'] = ['alice'];          // CRM revoked after the clarification
+        unset($this->wiki->pages['it:email:password']);            // one of two E-Mail pages deleted
+        $r2 = $this->ask('not VPN', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::CLARIFY, $r2['outcome']);
+        $this->assertSame(['E-Mail'], $r2['options'], 'revoked CRM never shown');
+        $this->assertStringNotContainsString('CRM', json_encode($r2));
+        $this->assertCount(1, $this->chat->calls, 'no model call');
+        // the stored follow-up state only references readable pages
+        $stored = $this->session['tabAAAAAAAA']['options'];
+        $this->assertSame([['label' => 'E-Mail', 'pages' => ['it:email:password-webmail']]], $stored);
+        // and choosing it answers only from readable evidence
+        $this->chat->queue("DECISION: ANSWER\nUSED: S1\nANSWER:\nSecurity tab.");
+        $r3 = $this->ask('1', 'tabAAAAAAAA', $r2['pendingId']);
+        $this->assertSame(['it:email:password-webmail'], array_map(fn($c) => $c->getPage(), $r3['sources']));
+        $after = array_slice($this->chat->calls, $callsBeforeRevoke);
+        $this->assertNotEmpty($after);
+        $this->assertStringNotContainsString('avatar', json_encode($after), 'revoked CRM evidence never reaches the model');
+        $this->assertStringNotContainsString('it:crm', json_encode($after));
+    }
+
+    public function testRejectionWithAllRemainingRevokedAsksGenerically()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        foreach (['it:crm:password', 'it:email:password', 'it:email:password-webmail'] as $p) $this->wiki->deny[$p] = ['alice'];
+        $r2 = $this->ask('not VPN', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::CLARIFY, $r2['outcome']);
+        $this->assertSame([], $r2['options'], 'generic question, no stale labels');
+        foreach (['CRM', 'E-Mail'] as $label) $this->assertStringNotContainsString($label, json_encode($r2));
+    }
+
+    public function testRejectionWithoutPageFetcherShowsNoStoredLabels()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $svc = new ConversationService($this->wiki->retriever(), $this->chat,
+            static fn(array $v) => "CLARIFY:{$v['clarify']}\nQ:{$v['question']}\n{$v['context']}",
+            new PendingStore($this->session, null, fn() => $this->now));
+        $r = $svc->handle('How do I change my password?', [], 'tabAAAAAAAA');
+        $r2 = $svc->handle('not VPN', [], 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame([], $r2['options'], 'cannot verify -> no menu');
+    }
+
     public function testRejectionWithCorrectionSearchesWithoutRejectedEvidence()
     {
         $this->chat->queue(self::CLARIFY_REPLY, "DECISION: NO_INFORMATION");

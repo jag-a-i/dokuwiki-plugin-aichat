@@ -190,6 +190,8 @@ class ConversationService
                 if ($rounds >= $this->conf['maxClarifyRounds']) {
                     return $this->result(Outcome::NOTICE, $reply, $this->lang['max_rounds'], [], $correlation, $redacted);
                 }
+                // options from earlier state are re-authorized before they are shown again
+                $remaining = $this->reauthorizeOptions($remaining);
                 $q = $remaining ? $this->lang['reject_followup'] : $this->lang['none_followup'];
                 return $this->clarifyResult($reply, $conversation, $need, $remaining, $q, $rounds + 1, $correlation, $redacted);
 
@@ -226,6 +228,35 @@ class ConversationService
             return $this->result(Outcome::NOTICE, $reply, $this->lang['max_rounds'], [], $correlation, $redacted);
         }
         return $result;
+    }
+
+    /**
+     * Re-check stored options against CURRENT permissions and content: keep an option only if at
+     * least one of its pages still exists and is readable, and keep only those pages. Without a
+     * page fetcher nothing can be verified, so no stored option is shown again.
+     */
+    protected function reauthorizeOptions(array $options): array
+    {
+        if (!$options) return [];
+        if (!$this->pageFetcher) return [];
+        $span = $this->span('acl_recheck', ['options' => count($options)]);
+        $readable = [];
+        $out = [];
+        foreach ($options as $opt) {
+            $pages = [];
+            foreach ($opt['pages'] as $page) {
+                if (!array_key_exists($page, $readable)) {
+                    $readable[$page] = false;
+                    foreach (($this->pageFetcher)($page) as $c) {
+                        if ($c->getPage() === $page) { $readable[$page] = true; break; }
+                    }
+                }
+                if ($readable[$page]) $pages[] = $page;
+            }
+            if ($pages) $out[] = ['label' => $opt['label'], 'pages' => $pages];
+        }
+        $this->end($span, ['readable_options' => count($out)]);
+        return $out;
     }
 
     /** pages that support ONLY rejected options (pages shared with a remaining option are kept) */
