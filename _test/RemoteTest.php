@@ -116,4 +116,26 @@ class RemoteTest extends \DokuWikiTest
             $prop->setValue($helper, $old);
         }
     }
+
+    public function testSimilarRedactsVolunteeredSecret()
+    {
+        $seen = new \ArrayObject();
+        $spy = new class($seen) extends \dokuwiki\plugin\aichat\Embeddings {
+            private \ArrayObject $seen;
+            public function __construct(\ArrayObject $seen) { $this->seen = $seen; }
+            public function getSimilarChunks($query, $lang = '', $limits = true) { $this->seen->append($query); return []; }
+        };
+        $helper = plugin_load('helper', 'aichat');
+        $prop = new \ReflectionProperty($helper, 'embeddings');
+        $prop->setAccessible(true);
+        $old = $prop->getValue($helper);
+        $prop->setValue($helper, $spy);
+        try {
+            plugin_load('remote', 'aichat')->similar('my vpn password is Hunter2!x');
+            $this->assertCount(1, $seen);
+            $this->assertStringNotContainsString('Hunter2!x', $seen[0]);
+        } finally {
+            $prop->setValue($helper, $old);
+        }
+    }
 }

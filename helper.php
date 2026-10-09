@@ -311,12 +311,7 @@ class helper_plugin_aichat extends Plugin
         $service = new ConversationService(
             $retriever,
             $chat,
-            fn(array $vars) => $this->getPrompt('decide', [
-                'context' => $vars['context'],
-                'question' => $vars['question'],
-                'clarify' => $vars['clarify'],
-                'customprompt' => $this->getConf('customprompt'),
-            ]),
+            fn(array $vars) => $this->buildDecisionPrompt($vars),
             $o['pendingStore'] ?? $this->getPendingStore(),
             [
                 'maxHistoryRows' => max((int)$this->getConf('chatHistory'), (int)$this->getConf('rephraseHistory')),
@@ -411,6 +406,22 @@ class helper_plugin_aichat extends Plugin
         foreach ($keys as $k) $data[$k] = $this->getConf($k);
         $data['decide_prompt'] = @md5_file($this->localFN('decide', 'prompt')) ?: '';
         return substr(sha1(json_encode($data)), 0, 12);
+    }
+
+    /**
+     * The decision prompt used by the web chat (also used by the evaluation runner)
+     *
+     * @param array $vars context, question, clarify
+     * @return string
+     */
+    public function buildDecisionPrompt(array $vars)
+    {
+        return $this->getPrompt('decide', [
+            'context' => $vars['context'],
+            'question' => $vars['question'],
+            'clarify' => $vars['clarify'],
+            'customprompt' => $this->getConf('customprompt'),
+        ]);
     }
 
     /**

@@ -97,6 +97,7 @@ class remote_plugin_aichat extends RemotePlugin
     {
         $helper = $this->initHelper('', $lang);
         $langlimit = $helper->getLanguageLimit();
+        [$query] = (new SecretRedactor())->redact((string)$query); // never send volunteered secrets to the embedding endpoint
 
         try {
             $embeddings = $helper->getEmbeddings();
