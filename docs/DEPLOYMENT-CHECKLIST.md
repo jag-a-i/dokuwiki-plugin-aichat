@@ -12,6 +12,9 @@ Unknown at handoff - must be confirmed by the operator:
       output becomes a safe ERROR, not an answer
 - [ ] Languages used in the wiki: decide.prompt exists in English only; answers follow the language setting
 - [ ] Langfuse: endpoint, keys, and whether any content capture is approved (default: metadata only)
+- [ ] Langfuse version is current and accepts OTLP/HTTP JSON (minimum version NOT verified; v3.22.0 only
+      decoded protobuf): run `bin/plugin.php aichat_telemetry --yes` and confirm the synthetic trace and its
+      attributes in the Langfuse UI
 - [ ] Retention: diagnostics_retention days; Langfuse-side retention is configured in Langfuse
 - [ ] Existing `logging` setting: if on, it still records answers, IP and user (pre-existing; propose migration)
 - [ ] Staging verification steps 1-6 passed with real content and real ACLs

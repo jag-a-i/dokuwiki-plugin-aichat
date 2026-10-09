@@ -173,4 +173,22 @@ class TelemetryRedirectTest extends \DokuWikiTest
             $this->assertStringContainsString('BODY-CANARY-0123', $this->requests($elog)[0]['body'], 'payload did reach the endpoint');
         }
     }
+
+    /** the preflight through the REAL transport against local servers (accepting / rejecting JSON) */
+    public function testPreflightOverRealTransport()
+    {
+        foreach ([[200, true], [415, false]] as [$status, $ok]) {
+            [$eport, $elog] = $this->server($status);
+            $r = \dokuwiki\plugin\aichat\Telemetry\Preflight::run([
+                'telemetry' => 'langfuse', 'telemetry_endpoint' => "http://127.0.0.1:$eport",
+                'telemetry_langfuse_public' => 'pk', 'telemetry_langfuse_secret' => 'sk',
+            ], \dokuwiki\plugin\aichat\Telemetry\ExporterFactory::dokuHttp());
+            $this->assertSame($ok, $r['ok'], (string)$status);
+            $this->assertSame($status, $r['status']);
+            $req = $this->requests($elog);
+            $this->assertCount(1, $req);
+            $this->assertSame('application/json', $req[0]['headers']['content-type']);
+            $this->assertSame('/api/public/otel/v1/traces', $req[0]['path']);
+        }
+    }
 }

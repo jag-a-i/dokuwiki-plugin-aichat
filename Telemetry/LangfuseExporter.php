@@ -3,14 +3,18 @@
 namespace dokuwiki\plugin\aichat\Telemetry;
 
 /**
- * Langfuse via its OpenTelemetry endpoint (verified against langfuse.com/docs/opentelemetry, 2026-10):
+ * Langfuse via its OpenTelemetry endpoint, as described in the CURRENT official documentation
+ * (langfuse.com/docs/opentelemetry, checked 2026-10):
  *  - POST {base}/api/public/otel/v1/traces, OTLP/HTTP JSON (gRPC is not supported by Langfuse)
  *  - Authorization: Basic base64(publicKey:secretKey)
  *  - x-langfuse-ingestion-version: 4 (real-time ingestion on the v4 data model)
  *  - trace level attributes (langfuse.session.id, langfuse.trace.name, langfuse.release,
  *    langfuse.trace.metadata.*) are propagated to every span
  *  - model calls are typed as generations, retrieval as retriever
- * Works with self-hosted Langfuse (>= v3.22) by pointing base URL at the instance.
+ * Self-hosted: point the base URL at the instance. Requires a Langfuse version that accepts OTLP over
+ * HTTP with a JSON body and maps langfuse.* attributes. The minimum such version is NOT verified
+ * (the first OTel endpoint, v3.22.0, only decoded protobuf). Never tested against a real Langfuse
+ * instance - verify with `bin/plugin.php aichat_telemetry --yes` (Telemetry\Preflight).
  * The deprecated /api/public/ingestion endpoint is intentionally not used.
  */
 class LangfuseExporter extends OtlpHttpExporter

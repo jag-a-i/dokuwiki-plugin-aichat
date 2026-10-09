@@ -112,8 +112,17 @@ the installed production revision and settings are unknown. Tested only in a san
 - `telemetry` = off (default) | langfuse | otlp. Nothing is sent unless configured.
 - Langfuse: OTLP/HTTP JSON to `{telemetry_endpoint}/api/public/otel/v1/traces`, Basic auth from
   `telemetry_langfuse_public`/`telemetry_langfuse_secret`, header `x-langfuse-ingestion-version: 4`
-  (verified against langfuse.com/docs/opentelemetry, Oct 2026; works with self-hosted Langfuse
-  >= 3.22). The deprecated `/api/public/ingestion` API is not used.
+  as described in the current official docs (langfuse.com/docs/opentelemetry, checked Oct 2026).
+  The deprecated `/api/public/ingestion` API is not used.
+- Langfuse version compatibility: requires a CURRENT Langfuse that accepts OTLP over HTTP with a JSON
+  body and maps `langfuse.*` attributes. The minimum self-hosted version is NOT verified - the first
+  OTel endpoint (v3.22.0) only decoded protobuf, so "has an OTel endpoint" is not sufficient. This
+  exporter was never tested against a real Langfuse instance; the E2E stand-in only proves the request
+  shape (path, headers, JSON body). Before relying on export run the preflight:
+  `bin/plugin.php aichat_telemetry --yes` - it sends ONE synthetic metadata-only trace and explains
+  the response (2xx accepted -> confirm in the Langfuse UI that the trace and attributes appear;
+  400/415 -> endpoint does not accept OTLP/JSON, upgrade; 404 -> no OTLP endpoint or wrong URL;
+  401/403 -> keys; 3xx -> redirect refused; 0 -> unreachable/TLS). Protobuf is not implemented.
 - One trace per chat turn, root span `aichat.turn` with child spans: rephrase, followup_resolution,
   retrieval (ACL-filtered inside Embeddings), acl_recheck (chosen pages), clarify_decision,
   model_call (Langfuse generation, model name, total-token delta or `usage.available=false`),
@@ -141,7 +150,8 @@ the installed production revision and settings are unknown. Tested only in a san
   OpenTelemetry collector.
 - Verifying delivery: point `telemetry_endpoint` at the instance, send one chat question, open the
   trace in Langfuse (filter by session id = `meta.conversationId`, or search the correlation id).
-  `_test/e2e/check_otel.py` shows the checks done against a local stand-in.
+  `_test/e2e/check_otel.py` shows the checks done against a local stand-in (transport shape only,
+  not Langfuse behaviour).
 - Retention of exported data is the responsibility of the receiving system.
 
 ## Known limits

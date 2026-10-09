@@ -21,6 +21,13 @@ both triggers on both backends; fails on the previous code. While writing it, a 
 (overwriting DokuWiki's global $conf) initially made the regression pass on vulnerable code; caught by
 checking against the old code, fixed, and the test now asserts allowdebug is active at export time.
 
+Official-source review (FIXED, documentation/preflight): the earlier claim "self-hosted Langfuse >= 3.22"
+was not valid for this JSON exporter (v3.22.0's OTel route only protobuf-decoded requests and lacked current
+langfuse.* mappings). The claim is removed; the minimum version is now documented as unverified, a current
+version accepting OTLP/HTTP JSON is required, the local stand-in is described as request-shape proof only,
+and an operator preflight (`aichat_telemetry --yes`, Telemetry\Preflight) with contract tests was added.
+Protobuf encoding was deliberately not implemented.
+
 Findings of this pass:
 - FIXED: remote `similar` sent the query unredacted to the embedding endpoint (`ask` already redacted).
 - FIXED (packaging): upstream `.gitattributes` export-ignores `_test/`; earlier checkpoint zips made with

@@ -1,4 +1,6 @@
-"""Verify the trace export the E2E run delivered to the local Langfuse stand-in (real HTTP, no external network)."""
+"""Verify the trace export the E2E run delivered to a local stand-in endpoint (real HTTP, no external network).
+This checks the REQUEST SHAPE only (path, headers, JSON body, spans, no leaks). It is not a Langfuse instance and
+says nothing about which Langfuse versions accept or map these requests."""
 import base64, json, sys
 reqs = [json.loads(l) for l in open(sys.argv[1]) if 'otel' in l]
 reqs = [r for r in reqs if r['path'].endswith('/api/public/otel/v1/traces')]

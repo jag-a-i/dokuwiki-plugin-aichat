@@ -42,7 +42,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])) or b'{}')
         entry = {'path': self.path, 'body': body}
-        if self.path.endswith('/api/public/otel/v1/traces'):  # local stand-in for a self-hosted Langfuse
+        if self.path.endswith('/api/public/otel/v1/traces'):  # local stand-in: records request shape only, not Langfuse behaviour
             entry['headers'] = {k.lower(): v for k, v in self.headers.items()}
         with open(LOG, 'a') as f: f.write(json.dumps(entry) + '\n')
         if 'headers' in entry:

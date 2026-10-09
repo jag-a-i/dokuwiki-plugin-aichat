@@ -19,7 +19,8 @@ models / synthetic fixtures unless stated otherwise. No live model, vector store
 | History replay compatibility (old rows) | implemented, tested (browser E2E) |
 | Feedback Helpful/Not helpful + categories | implemented, tested (real AJAX + browser E2E) |
 | Local metadata-only diagnostics, retention | implemented, tested |
-| Langfuse OTLP exporter + generic OTLP + pluggable interface | implemented, tested (mocked transport + real HTTP to local stand-in) |
+| Langfuse OTLP exporter + generic OTLP + pluggable interface | implemented, tested (mocked transport + real HTTP to a local stand-in = request shape only) |
+| Langfuse version compatibility | **unverified**: needs a current Langfuse accepting OTLP/HTTP JSON + langfuse.* mappings; minimum version unknown; preflight `aichat_telemetry --yes` provided |
 | Admin summary (admin only, CSV aggregates) | implemented, tested |
 | Evaluation runner + synthetic fixtures | implemented, tested with scripted models; **live Gemma / candidate: NOT RUN** |
 | Live staging with real wiki content, ACLs, Qdrant, llama-swap | **NOT RUN** (no access, not authorized) |

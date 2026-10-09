@@ -39,6 +39,8 @@ New settings and defaults:
 - `feedback` = on, `diagnostics` = on, `diagnostics_retention` = 30 days (local, metadata only)
 - `telemetry` = off. To test Langfuse later: `telemetry=langfuse`, `telemetry_endpoint` = base URL of your
   self-hosted instance, public/secret key. Only after approving the endpoint and the captured data.
+  Then run `php bin/plugin.php aichat_telemetry --yes` (one synthetic metadata-only trace) and check the
+  trace in Langfuse. Compatibility with your Langfuse version is unverified until this succeeds.
 - `telemetry_capture` = none (metadata only). Enabling question/answer/context export is a separate privacy decision.
 Unchanged: models, endpoint, storage, Qdrant collection, thresholds, prompts other than the new `decide.prompt`.
 

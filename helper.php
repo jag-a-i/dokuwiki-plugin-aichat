@@ -382,6 +382,17 @@ class helper_plugin_aichat extends Plugin
     }
 
     /**
+     * Full plugin configuration (incl. defaults), e.g. for the telemetry preflight
+     *
+     * @return array
+     */
+    public function getPluginConf()
+    {
+        $this->loadConfig();
+        return $this->conf;
+    }
+
+    /**
      * @return TurnTelemetry
      */
     public function getTelemetry()
