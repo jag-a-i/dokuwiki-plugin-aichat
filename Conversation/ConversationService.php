@@ -39,7 +39,7 @@ class ConversationService
     protected $conf;
     /** @var array */
     protected $lang;
-    /** @var TraceRecorder|null */
+    /** @var \dokuwiki\plugin\aichat\Telemetry\TraceRecorder|null */
     protected $trace;
     /** @var callable|null (string $page): Chunk[]  chunks of one page, ONLY if the current user may read it */
     protected $pageFetcher;
@@ -264,7 +264,7 @@ class ConversationService
         string $question, string $search, array $history, string $conversation, string $correlation,
         bool $redacted, bool $allowClarify, int $rounds, ?array $preferPages, array $excludePages = []
     ): array {
-        $span = $this->span('retrieval');
+        $span = $this->span('retrieval', ['acl_filtered' => true]);
         $chunks = array_values(($this->retriever)($search));
         if ($excludePages) {
             $ex = array_flip($excludePages);
@@ -281,6 +281,7 @@ class ConversationService
                 if (isset($prefer[$c->getPage()])) $selected[] = $c;
             }
             if ($this->pageFetcher) {
+                $aclSpan = $this->span('acl_recheck', ['pages' => count($preferPages)]);
                 $seen = [];
                 foreach ($selected as $c) $seen[$c->getPage() . '#' . $c->getId()] = true;
                 foreach ($preferPages as $page) {
@@ -290,6 +291,7 @@ class ConversationService
                         if (!isset($seen[$k])) { $selected[] = $c; $seen[$k] = true; }
                     }
                 }
+                $this->end($aclSpan, ['readable_chunks' => count($selected)]);
             }
             $chunks = $selected;
         }
@@ -307,6 +309,9 @@ class ConversationService
             $context[] = "[$ref] " . ($this->titleFn)($chunk->getPage()) . "\n```\n" . $chunk->getText() . "\n```";
         }
 
+        if ($this->trace && $this->trace->captures('context')) {
+            $this->trace->content('context', $this->redactor->redact(implode("\n\n", $context))[0]);
+        }
         $prompt = ($this->promptBuilder)([
             'context' => implode("\n\n", $context),
             'question' => $question,
@@ -376,20 +381,43 @@ class ConversationService
     /** one model call plus at most one bounded repair attempt */
     protected function decide(array $messages): ?array
     {
-        $span = $this->span('model_call');
-        $raw = $this->chat->getAnswer($messages);
-        $this->end($span);
+        $raw = $this->modelCall($messages, false);
         $parsed = $this->parser->parse($raw);
         if ($parsed !== null) return $parsed;
 
-        $span = $this->span('model_call', ['repair' => true]);
         $messages[] = ['role' => 'assistant', 'content' => mb_substr($raw, 0, 4000)];
         $messages[] = ['role' => 'user', 'content' =>
             'Your reply did not follow the required format. Reply again, starting with a line ' .
             '"DECISION: ANSWER", "DECISION: CLARIFY" or "DECISION: NO_INFORMATION", exactly as instructed.'];
-        $raw = $this->chat->getAnswer($messages);
-        $this->end($span);
+        $raw = $this->modelCall($messages, true);
         return $this->parser->parse($raw);
+    }
+
+    /** one traced model call; usage is the delta of the model's cumulative counters */
+    protected function modelCall(array $messages, bool $repair): string
+    {
+        $before = $this->usage();
+        $span = $this->span('model_call', ['model' => (string)$this->chat->getModelName(), 'repair' => $repair]);
+        try {
+            $raw = $this->chat->getAnswer($messages);
+        } finally {
+            $after = $this->usage();
+            $tokens = $after['tokens'] - $before['tokens'];
+            $this->end($span, $tokens > 0
+                ? ['usage.total_tokens' => $tokens, 'usage.available' => true]
+                : ['usage.available' => false]);
+        }
+        return $raw;
+    }
+
+    protected function usage(): array
+    {
+        try {
+            $u = $this->chat->getUsageStats();
+            return ['tokens' => (int)($u['tokens'] ?? 0)];
+        } catch (\Throwable $e) {
+            return ['tokens' => 0];
+        }
     }
 
     /**
@@ -523,6 +551,6 @@ class ConversationService
 
     protected function end($span, array $attrs = []): void
     {
-        if ($this->trace && $span !== null) $this->trace->end($span, $attrs);
+        if ($this->trace && $span !== null && $span >= 0) $this->trace->end($span, $attrs);
     }
 }

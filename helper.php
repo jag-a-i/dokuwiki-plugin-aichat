@@ -15,6 +15,8 @@ use dokuwiki\plugin\aichat\Model\ChatInterface;
 use dokuwiki\plugin\aichat\Model\EmbeddingInterface;
 use dokuwiki\plugin\aichat\ModelFactory;
 use dokuwiki\plugin\aichat\Storage\AbstractStorage;
+use dokuwiki\plugin\aichat\Telemetry\TraceRecorder;
+use dokuwiki\plugin\aichat\Telemetry\TurnTelemetry;
 
 /**
  * DokuWiki Plugin aichat (Helper Component)
@@ -31,6 +33,10 @@ class helper_plugin_aichat extends Plugin
     protected $conversationOverrides = [];
     /** @var array backing data for the PendingStore of this request */
     protected $pendingData = [];
+    /** @var array|null [result, TraceRecorder] of the last web chat turn, for export after the response */
+    protected $lastTurn = null;
+    /** @var TurnTelemetry|null */
+    protected $telemetry = null;
 
     /** @var CLIPlugin $logger */
     protected $logger;
@@ -75,6 +81,7 @@ class helper_plugin_aichat extends Plugin
      */
     public function updateConfig(array $config)
     {
+        $this->telemetry = null;
         $this->conf = array_merge($this->conf, $config);
         $this->factory->updateConfig($config);
     }
@@ -300,6 +307,7 @@ class helper_plugin_aichat extends Plugin
             $rephraser = $o['rephraser'] ?? fn($q, $h) => $this->rephraseChatQuestion($q, $h);
         }
 
+        $trace = $o['trace'] ?? $this->getTelemetry()->newRecorder();
         $service = new ConversationService(
             $retriever,
             $chat,
@@ -318,11 +326,91 @@ class helper_plugin_aichat extends Plugin
             $rephraser,
             static fn($page) => p_get_first_heading($page) ?: $page,
             new AnswerFormatter([self::class, 'wikiPageFromUrl']),
-            $o['trace'] ?? null,
+            $trace,
             // chunks of a chosen page; getPageChunks() applies the current user's read ACL
             $o['pageFetcher'] ?? (isset($o['retriever']) ? null : fn($page) => $this->getEmbeddings()->getPageChunks($page))
         );
-        return $service->handle((string)$question, $history, (string)$conversation, (string)$pendingId);
+        $result = $service->handle((string)$question, $history, (string)$conversation, (string)$pendingId);
+        $this->finishTurn($result, $trace, $chat);
+        return $result;
+    }
+
+    /**
+     * Close the trace and write the local metadata record (never throws)
+     *
+     * @param array $result
+     * @param TraceRecorder $trace
+     * @param ChatInterface $chat
+     * @return void
+     */
+    protected function finishTurn(array $result, TraceRecorder $trace, $chat)
+    {
+        try {
+            global $INPUT;
+            $model = (string)$chat->getModelName();
+            $telemetry = $this->getTelemetry();
+            $trace->finish([
+                'outcome' => $result['outcome'],
+                'correlation_id' => $result['correlationId'],
+                'response_id' => $result['responseId'],
+                'error_category' => $result['errorCategory'] ?? '',
+                'sources' => count($result['sources']),
+                'options' => count($result['options']),
+                'redacted' => (bool)$result['redacted'],
+                'model' => $model,
+                'conf_rev' => $this->getConfigRevision(),
+            ]);
+            $telemetry->captureContent($trace, $result);
+            $owner = TurnTelemetry::owner($INPUT->server->str('REMOTE_USER'), (string)session_id(), auth_cookiesalt());
+            $telemetry->record($result, $trace, $owner, $model, $this->getConfigRevision());
+            $this->lastTurn = [$result, $trace];
+        } catch (\Throwable $e) {
+            $this->lastTurn = null;
+        }
+    }
+
+    /**
+     * Export the trace of the last web chat turn (call after the response was sent; never throws)
+     *
+     * @return string export status
+     */
+    public function exportLastTurn()
+    {
+        if (!$this->lastTurn) return 'none';
+        [$result, $trace] = $this->lastTurn;
+        $this->lastTurn = null;
+        try {
+            return $this->getTelemetry()->export($trace, (string)$result['conversationId'], (string)$this->getInfo()['date']);
+        } catch (\Throwable $e) {
+            return 'failed';
+        }
+    }
+
+    /**
+     * @return TurnTelemetry
+     */
+    public function getTelemetry()
+    {
+        if (!$this->telemetry) {
+            global $conf;
+            $this->telemetry = new TurnTelemetry($this->conf, $conf['metadir'], $this->conversationOverrides['telemetryHttp'] ?? null);
+        }
+        return $this->telemetry;
+    }
+
+    /**
+     * Short hash of the answer-relevant configuration (no secrets in clear text)
+     *
+     * @return string
+     */
+    public function getConfigRevision()
+    {
+        $keys = ['chatmodel', 'rephrasemodel', 'embedmodel', 'storage', 'similarityThreshold', 'contextChunks',
+            'fullpagecontext', 'chatHistory', 'rephraseHistory', 'customprompt', 'preferUIlanguage'];
+        $data = [];
+        foreach ($keys as $k) $data[$k] = $this->getConf($k);
+        $data['decide_prompt'] = @md5_file($this->localFN('decide', 'prompt')) ?: '';
+        return substr(sha1(json_encode($data)), 0, 12);
     }
 
     /**
@@ -351,6 +439,7 @@ class helper_plugin_aichat extends Plugin
     public function setConversationOverrides(array $overrides)
     {
         $this->conversationOverrides = $overrides;
+        $this->telemetry = null;
     }
 
     /**

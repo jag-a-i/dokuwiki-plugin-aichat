@@ -25,6 +25,11 @@ $conf['plugin']['aichat']['generic_apiurl'] = 'http://127.0.0.1:8099/v1';
 $conf['plugin']['aichat']['generic_apikey'] = 'placeholder-not-a-secret';
 $conf['plugin']['aichat']['storage'] = 'SQLite';
 $conf['plugin']['aichat']['similarityThreshold'] = 20;
+// trace export to the LOCAL mock only (stand-in for a self-hosted Langfuse); placeholder keys
+$conf['plugin']['aichat']['telemetry'] = 'langfuse';
+$conf['plugin']['aichat']['telemetry_endpoint'] = 'http://127.0.0.1:8099';
+$conf['plugin']['aichat']['telemetry_langfuse_public'] = 'pk-lf-placeholder';
+$conf['plugin']['aichat']['telemetry_langfuse_secret'] = 'sk-lf-placeholder';
 PHP
 NOTE=$'\nThis synthetic page exists only for automated testing. It contains no real procedures, accounts or personal data of any kind.'
 mk(){ mkdir -p "$SITE/data/pages/$(dirname "$1")"; printf '%s\n%s\n' "$2" "$NOTE" > "$SITE/data/pages/$1.txt"; }
@@ -35,6 +40,7 @@ mk it/hr/password $'====== HR portal password ======\nHR password change procedu
 mk kitchen/coffee $'====== Coffee machine ======\nThe coffee machine is descaled every Friday.'
 printf '====== Synthetic Test Wiki ======\n<aichat>Hello from the synthetic test wiki</aichat>\n' > "$SITE/data/pages/start.txt"
 
+: > "$WORK/requests.jsonl"   # fresh request log per run
 python3 "$HERE/mock_llm.py" 8099 "$WORK/requests.jsonl" & MOCK=$!
 php -S 127.0.0.1:8088 -t "$SITE" > "$WORK/php.log" 2>&1 & PHPSRV=$!
 trap 'kill $MOCK $PHPSRV 2>/dev/null' EXIT
@@ -42,3 +48,4 @@ sleep 1
 (cd "$SITE" && php bin/indexer.php -q && php bin/plugin.php aichat embed --clear > "$WORK/embed.log" 2>&1)
 find "$SITE/data/cache" -name '*.js' -delete   # never test a stale combined JS bundle
 python3 "$HERE/test_ui_e2e.py" http://127.0.0.1:8088 "$WORK"
+python3 "$HERE/check_otel.py" "$WORK/requests.jsonl"

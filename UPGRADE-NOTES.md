@@ -81,6 +81,51 @@ the installed production revision and settings are unknown. Tested only in a san
 - Pages smaller than 150 bytes are never embedded (`Embeddings::createNewIndex`). Short wiki pages
   are therefore invisible to the chat.
 
+## Feedback (Helpful / Not helpful)
+- Shown on ANSWER responses only (`meta.feedback` = true). AJAX call `aichat_feedback`, POST
+  `responseId`, `vote` (helpful | not_helpful), optional `category` (wrong_answer,
+  missing_information, wrong_source, unclear; only with not_helpful), `sectok`.
+- The response id is server-issued and bound to a keyed hash of the user (or guest session);
+  another user's id answers 404 (same as unknown ids, so ids cannot be probed). One vote per
+  response; changing it overwrites. Free-text feedback is not implemented (off by design).
+- Guests: allowed only if guests may use the chat (`restrict`) and have a session; bound to that
+  session. Disabled by `feedback = 0`.
+
+## Local diagnostics (metadata only)
+- One JSON file per response in `data/meta/aichat/responses/` (id, time, outcome, owner hash,
+  chat model name, config revision hash, source/option counts, per-stage timings, sanitized error
+  category, trace id). Never questions, answers, retrieved text, page ids, IPs or user names.
+- Finite retention: `diagnostics_retention` days (default 30), cleanup at most daily on write.
+  `diagnostics = 0` keeps only what feedback needs (id, time, owner hash, outcome).
+- Storage failures are swallowed; they never affect the chat. Historical `logging` files are untouched.
+
+## Trace export (Langfuse first-class, pluggable)
+- `telemetry` = off (default) | langfuse | otlp. Nothing is sent unless configured.
+- Langfuse: OTLP/HTTP JSON to `{telemetry_endpoint}/api/public/otel/v1/traces`, Basic auth from
+  `telemetry_langfuse_public`/`telemetry_langfuse_secret`, header `x-langfuse-ingestion-version: 4`
+  (verified against langfuse.com/docs/opentelemetry, Oct 2026; works with self-hosted Langfuse
+  >= 3.22). The deprecated `/api/public/ingestion` API is not used.
+- One trace per chat turn, root span `aichat.turn` with child spans: rephrase, followup_resolution,
+  retrieval (ACL-filtered inside Embeddings), acl_recheck (chosen pages), clarify_decision,
+  model_call (Langfuse generation, model name, total-token delta or `usage.available=false`),
+  render, error (category only). `langfuse.session.id` = per-tab conversation id; trace metadata
+  carries outcome, correlation id and response id, propagated to every span.
+- Metadata only by default. `telemetry_capture` (question, answer, context) is an explicit, separate
+  privacy decision; captured text is secret-redacted best-effort. User names, IPs and credentials
+  are never exported.
+- Bounded: `telemetry_timeout` seconds per attempt (1-10), `telemetry_retries` (0-2; 4xx except 429
+  is not retried); failed traces go to a spool (`data/meta/aichat/spool/`, max
+  `telemetry_spool_max` files, `telemetry_spool_days` days) and up to 2 are re-sent after the next
+  successful export. Export runs after the answer was sent (`fastcgi_finish_request` under FPM);
+  with mod_php the request still finishes the export before the worker is freed.
+- Other backends: `ExporterFactory::register('name', fn($conf, $http, $spool) => new MyExporter())`
+  with an `ExporterInterface` implementation; no chat code changes needed. `otlp` targets any
+  OpenTelemetry collector.
+- Verifying delivery: point `telemetry_endpoint` at the instance, send one chat question, open the
+  trace in Langfuse (filter by session id = `meta.conversationId`, or search the correlation id).
+  `_test/e2e/check_otel.py` shows the checks done against a local stand-in.
+- Retention of exported data is the responsibility of the receiving system.
+
 ## Known limits
 - Secret detection is pattern based ("password is X", common token formats). A bare password
   typed without context is not detected.

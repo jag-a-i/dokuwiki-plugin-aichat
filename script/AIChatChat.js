@@ -222,6 +222,29 @@ class AIChatChat extends HTMLElement {
                 cursor: pointer;
                 padding: 0.25em 0.75em;
             }
+            .ai .feedback {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 0.25em;
+                margin-top: 0.5em;
+                font-size: 0.9em;
+            }
+            .ai .feedback button[aria-pressed="true"] {
+                font-weight: bold;
+                outline: 2px solid var(--color-link);
+            }
+            .ai .feedback .categories {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.25em;
+            }
+            .ai .feedback .categories[hidden] {
+                display: none;
+            }
+            .ai .feedback.error .status {
+                color: #a00;
+            }
         `;
         return style;
     }
@@ -334,6 +357,99 @@ class AIChatChat extends HTMLElement {
     }
 
     /**
+     * Build the Helpful / Not helpful control for an answer
+     *
+     * @param {object} meta response metadata (responseId, feedback state)
+     * @returns {HTMLDivElement}
+     */
+    feedbackControl(meta) {
+        const L = (key, fallback) => (window.LANG && LANG.plugins && LANG.plugins.aichat && LANG.plugins.aichat[key]) || fallback;
+        const box = document.createElement('div');
+        box.classList.add('feedback');
+        box.setAttribute('role', 'group');
+        box.setAttribute('aria-label', L('feedback_question', 'Was this answer helpful?'));
+
+        const status = document.createElement('span');
+        status.classList.add('status');
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+
+        const cats = document.createElement('div');
+        cats.classList.add('categories');
+        cats.setAttribute('role', 'group');
+        cats.setAttribute('aria-label', L('feedback_reason', 'What was wrong? (optional)'));
+        cats.hidden = true;
+
+        const state = meta.vote || {vote: '', category: ''};
+        const voteButtons = {};
+        const catButtons = {};
+        const render = () => {
+            Object.entries(voteButtons).forEach(([v, b]) => b.setAttribute('aria-pressed', String(state.vote === v)));
+            Object.entries(catButtons).forEach(([c, b]) => b.setAttribute('aria-pressed', String(state.category === c)));
+            cats.hidden = state.vote !== 'not_helpful';
+        };
+        const save = async (vote, category) => {
+            status.textContent = '';
+            try {
+                const ok = await this.sendFeedback(meta.responseId, vote, category);
+                if (!ok) throw new Error('not saved');
+                state.vote = vote;
+                state.category = category;
+                meta.vote = {vote, category};
+                this.saveHistory(); // meta objects are shared with the history rows
+                status.textContent = L('feedback_saved', 'Thanks, your feedback was saved.');
+                box.classList.remove('error');
+            } catch (e) {
+                status.textContent = L('feedback_error', 'Sorry, your feedback could not be saved.');
+                box.classList.add('error');
+            }
+            render();
+        };
+
+        [['helpful', L('feedback_helpful', 'Helpful')], ['not_helpful', L('feedback_not_helpful', 'Not helpful')]]
+            .forEach(([vote, label]) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.classList.add('vote', vote);
+                b.textContent = label;
+                b.addEventListener('click', () => save(vote, ''));
+                voteButtons[vote] = b;
+                box.appendChild(b);
+            });
+        ['wrong_answer', 'missing_information', 'wrong_source', 'unclear'].forEach((cat) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.classList.add('category', cat);
+            b.textContent = L('feedback_cat_' + cat, cat.replace('_', ' '));
+            b.addEventListener('click', () => save('not_helpful', state.category === cat ? '' : cat));
+            catButtons[cat] = b;
+            cats.appendChild(b);
+        });
+        box.appendChild(cats);
+        box.appendChild(status);
+        render();
+        return box;
+    }
+
+    /**
+     * Send a feedback vote
+     *
+     * @returns {Promise<boolean>} true if the server saved it
+     */
+    async sendFeedback(responseId, vote, category) {
+        const formData = new FormData();
+        formData.append('responseId', responseId);
+        formData.append('vote', vote);
+        formData.append('category', category || '');
+        formData.append('sectok', (window.JSINFO && JSINFO.plugin_aichat && JSINFO.plugin_aichat.sectok) || '');
+        const url = (this.getAttribute('url') || '/').replace(/([?&]call=)aichat(?=&|$)/, '$1aichat_feedback');
+        const response = await fetch(url, {method: 'POST', body: formData});
+        if (!response.ok) return false;
+        const data = await response.json();
+        return data.ok === true;
+    }
+
+    /**
      * Remove any clickable clarification options (they are only valid for the latest question)
      */
     removeOptions() {
@@ -412,6 +528,10 @@ class AIChatChat extends HTMLElement {
                 ul.appendChild(li);
             });
             div.appendChild(ul);
+        }
+
+        if (meta && outcome === 'ANSWER' && meta.feedback && meta.responseId) {
+            div.appendChild(this.feedbackControl(meta));
         }
 
         if (interactive && meta && outcome === 'CLARIFY' && Array.isArray(meta.options) && meta.options.length) {

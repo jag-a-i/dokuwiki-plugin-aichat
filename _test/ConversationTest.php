@@ -336,6 +336,50 @@ class ConversationTest extends \DokuWikiTest
         $this->assertSame([], $fresh, 'consumed token not resurrected');
     }
 
+    // trace spans cover the whole clarify -> choice flow, correlated, metadata only
+    public function testTraceSpansAcrossClarificationAndFollowup()
+    {
+        $mk = fn($trace) => new ConversationService(
+            $this->wiki->retriever(), $this->chat,
+            static fn(array $v) => "CLARIFY:{$v['clarify']}\nQ:{$v['question']}\n{$v['context']}",
+            new PendingStore($this->session, null, fn() => $this->now),
+            [], [], static fn($q) => $q . ' (rephrased)', null, null, $trace, $this->wiki->pageFetcher()
+        );
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse vpnctl.");
+        $t1 = new \dokuwiki\plugin\aichat\Telemetry\TraceRecorder();
+        $r = $mk($t1)->handle('How do I change my password?', [['earlier', 'answer']], 'tabAAAAAAAA');
+        $this->assertSame(['rephrase', 'retrieval', 'model_call', 'clarify_decision'],
+            array_column($t1->toArray()['spans'], 'name'));
+        $t2 = new \dokuwiki\plugin\aichat\Telemetry\TraceRecorder();
+        $mk($t2)->handle('2', [], 'tabAAAAAAAA', $r['pendingId']);
+        $spans = $t2->toArray()['spans'];
+        $this->assertSame(['followup_resolution', 'retrieval', 'acl_recheck', 'model_call', 'render'], array_column($spans, 'name'));
+        $this->assertSame('choice', $spans[0]['attrs']['type']);
+        $this->assertSame(1, $spans[2]['attrs']['readable_chunks']);
+        $this->assertSame('fake', $spans[3]['attrs']['model']);
+        $this->assertFalse($spans[3]['attrs']['usage.available'], 'unknown usage is marked, not invented');
+        $this->assertStringNotContainsString('vpnctl', json_encode($t2->toArray()));
+        $this->assertStringNotContainsString('password', json_encode($t2->toArray()));
+    }
+
+    public function testContextCaptureOnlyWhenEnabled()
+    {
+        $this->chat->queue("DECISION: ANSWER\nUSED: S1\nANSWER:\nUse vpnctl.", "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse vpnctl.");
+        foreach ([[], ['context']] as $capture) {
+            $t = new \dokuwiki\plugin\aichat\Telemetry\TraceRecorder($capture);
+            (new ConversationService($this->wiki->retriever(), $this->chat,
+                static fn(array $v) => $v['context'], new PendingStore($this->session),
+                [], [], null, null, null, $t))->handle('my vpn password is Hunter2!x how to change', [], 'tabAAAAAAAA');
+            $content = $t->toArray()['content'];
+            if (!$capture) {
+                $this->assertSame([], $content);
+            } else {
+                $this->assertStringContainsString('vpnctl', $content['context']);
+                $this->assertStringNotContainsString('Hunter2!x', json_encode($t->toArray()));
+            }
+        }
+    }
+
     // 8. tabs, users, forged ids, expiry, invalid conversation ids cannot bypass or hijack clarification
     public function provideForeignState(): array
     {

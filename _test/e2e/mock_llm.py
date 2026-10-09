@@ -41,7 +41,12 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])) or b'{}')
-        with open(LOG, 'a') as f: f.write(json.dumps({'path': self.path, 'body': body}) + '\n')
+        entry = {'path': self.path, 'body': body}
+        if self.path.endswith('/api/public/otel/v1/traces'):  # local stand-in for a self-hosted Langfuse
+            entry['headers'] = {k.lower(): v for k, v in self.headers.items()}
+        with open(LOG, 'a') as f: f.write(json.dumps(entry) + '\n')
+        if 'headers' in entry:
+            self.send_response(200); self.send_header('Content-Length', '2'); self.end_headers(); self.wfile.write(b'{}'); return
         if self.path.endswith('/embeddings'):
             out = {'data': [{'embedding': embed(t)} for t in body['input']], 'usage': {'total_tokens': 1}}
         elif self.path.endswith('/chat/completions'):

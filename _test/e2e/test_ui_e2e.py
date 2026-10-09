@@ -86,10 +86,44 @@ with sync_playwright() as p:
     check('source list is the selected authorized page only', srcs == ['VPN password'], srcs)
     check('fabricated source link removed', 'Secret' not in text and 'it:hr' not in ans.inner_html(), ans.inner_html())
     check('options removed after choosing', out.locator('.options').count() == 0)
+
+    # feedback on the answer (keyboard accessible, saved state, change of vote, category)
+    fb = ans.locator('.feedback')
+    check('answer has a labelled feedback group', fb.count() == 1 and fb.get_attribute('aria-label') == 'Was this answer helpful?')
+    check('clarification had no feedback control', out.locator('.ai').nth(1).locator('.feedback').count() == 0)
+    helpful = fb.locator('button.vote.helpful')
+    helpful.focus()
+    page.keyboard.press('Enter')
+    page.wait_for_function('() => document.querySelector("aichat-chat").shadowRoot.querySelector(".feedback .status").textContent.length > 0', timeout=5000)
+    check('keyboard vote saved with status message', 'saved' in fb.locator('.status').inner_text()
+          and helpful.get_attribute('aria-pressed') == 'true', fb.inner_text())
+    check('categories hidden for helpful', fb.locator('.categories').is_hidden())
+    fb.locator('button.vote.not_helpful').click()
+    page.wait_for_function('() => document.querySelector("aichat-chat").shadowRoot.querySelector("button.vote.not_helpful").getAttribute("aria-pressed") === "true"', timeout=5000)
+    check('vote can be changed', helpful.get_attribute('aria-pressed') == 'false')
+    check('categories shown for not helpful', fb.locator('.categories').is_visible())
+    fb.locator('button.category.wrong_source').click()
+    page.wait_for_function('() => document.querySelector("aichat-chat").shadowRoot.querySelector("button.category.wrong_source").getAttribute("aria-pressed") === "true"', timeout=5000)
+    check('category saved', 'saved' in fb.locator('.status').inner_text())
+    page.evaluate('JSINFO.plugin_aichat.sectok = "forged"')
+    errors_before = len(errors)
+    fb.locator('button.vote.helpful').click()
+    page.wait_for_function('() => document.querySelector("aichat-chat").shadowRoot.querySelector(".feedback").classList.contains("error")', timeout=5000)
+    check('failed save shows error state and keeps previous vote',
+          'could not be saved' in fb.locator('.status').inner_text()
+          and fb.locator('button.vote.not_helpful').get_attribute('aria-pressed') == 'true')
+    del errors[errors_before:]  # the deliberate 403 of this step
+    page.reload()
+    page.wait_for_timeout(300)
+    fb2 = out.locator('.ai').last.locator('.feedback')
+    check('replay keeps the saved vote and category',
+          fb2.locator('button.vote.not_helpful').get_attribute('aria-pressed') == 'true'
+          and fb2.locator('button.category.wrong_source').get_attribute('aria-pressed') == 'true')
+    page.screenshot(path=f'{SHOTS}/e2e-3-feedback.png')
     page.screenshot(path=f'{SHOTS}/e2e-2-answer.png')
 
     # 3. replay after reload: no duplicate footer, no stale options
-    page.reload()
+    page.goto(f'{BASE}/doku.php?id=start')  # fresh page: fresh JSINFO token
     page.wait_for_timeout(300)
     replay = out.inner_text()
     check('replay keeps footer exactly once', replay.count(FOOTER) == 1, replay)

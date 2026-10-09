@@ -8,6 +8,8 @@ use dokuwiki\plugin\aichat\Chunk;
 use dokuwiki\plugin\aichat\Conversation\ConversationService;
 use dokuwiki\plugin\aichat\Conversation\ErrorReporter;
 use dokuwiki\plugin\aichat\Conversation\Outcome;
+use dokuwiki\plugin\aichat\Telemetry\ResponseLog;
+use dokuwiki\plugin\aichat\Telemetry\TurnTelemetry;
 
 /**
  * DokuWiki Plugin aichat (Action Component)
@@ -52,6 +54,10 @@ class action_plugin_aichat extends ActionPlugin
      */
     public function handleQuestion(Event $event, mixed $param)
     {
+        if ($event->data === 'aichat_feedback') {
+            $this->handleFeedback($event);
+            return;
+        }
         if ($event->data !== 'aichat') return;
         $event->preventDefault();
         $event->stopPropagation();
@@ -138,8 +144,17 @@ class action_plugin_aichat extends ActionPlugin
                 'responseId' => $result['responseId'],
                 'correlationId' => $result['correlationId'],
                 'warning' => $result['warning'],
+                'feedback' => $result['outcome'] === Outcome::ANSWER && $this->feedbackAvailable(),
             ]),
         ], JSON_THROW_ON_ERROR);
+
+        // trace export happens after the answer was delivered (FPM), bounded by timeout/retries
+        if (function_exists('fastcgi_finish_request')) {
+            @fastcgi_finish_request();
+        } else {
+            @flush();
+        }
+        $helper->exportLastTurn();
 
         // pre-existing opt-in raw logging, unchanged in format (privacy issue documented);
         // logs the redacted question instead of the raw input, and nothing for errors
@@ -162,6 +177,67 @@ class action_plugin_aichat extends ActionPlugin
         }
     }
 
+    /** feedback needs a place to store votes and an owner to bind them to */
+    protected function feedbackAvailable(): bool
+    {
+        global $INPUT;
+        return (bool)$this->getConf('feedback')
+            && ($INPUT->server->str('REMOTE_USER') !== '' || session_id() !== '');
+    }
+
+    /**
+     * AJAX call aichat_feedback: set or change the vote for one of the current user's answers
+     *
+     * POST: responseId (opaque, server-issued), vote (helpful|not_helpful),
+     *       category (optional, only with not_helpful), sectok
+     * Free-text feedback is intentionally not supported.
+     *
+     * @param Event $event
+     * @return void
+     */
+    public function handleFeedback(Event $event)
+    {
+        $event->preventDefault();
+        $event->stopPropagation();
+        global $INPUT;
+        header('Content-Type: application/json');
+
+        $reply = static function (int $status, array $data) {
+            http_status($status);
+            echo json_encode($data, JSON_THROW_ON_ERROR);
+        };
+
+        /** @var helper_plugin_aichat $helper */
+        $helper = plugin_load('helper', 'aichat');
+        if (!$helper->userMayAccess() || !$this->getConf('feedback')) {
+            $reply(403, ['ok' => false, 'error' => 'forbidden']);
+            return;
+        }
+        if (!checkSecurityToken($INPUT->post->str('sectok'))) {
+            $reply(403, ['ok' => false, 'error' => 'sectok']);
+            return;
+        }
+        $id = substr($INPUT->post->str('responseId'), 0, 64);
+        $vote = substr($INPUT->post->str('vote'), 0, 32);
+        $category = substr($INPUT->post->str('category'), 0, 32);
+        if (!ResponseLog::isValidId($id) || !in_array($vote, ResponseLog::VOTES, true) ||
+            ($category !== '' && ($vote !== 'not_helpful' || !in_array($category, ResponseLog::CATEGORIES, true)))) {
+            $reply(400, ['ok' => false, 'error' => 'invalid']);
+            return;
+        }
+        $owner = TurnTelemetry::owner($INPUT->server->str('REMOTE_USER'), (string)session_id(), auth_cookiesalt());
+        $log = $helper->getTelemetry()->log;
+        if ($owner === '' || !$log) {
+            $reply(403, ['ok' => false, 'error' => 'no_owner']);
+            return;
+        }
+        $status = $log->setFeedback($id, $owner, $vote, $category);
+        $map = ['ok' => 200, 'invalid' => 400, 'not_found' => 404, 'not_allowed' => 409, 'error' => 500];
+        $reply($map[$status] ?? 500, $status === 'ok'
+            ? ['ok' => true, 'vote' => $vote, 'category' => $category]
+            : ['ok' => false, 'error' => $status]);
+    }
+
     protected function meta(array $data): array
     {
         return array_merge([
@@ -173,6 +249,7 @@ class action_plugin_aichat extends ActionPlugin
             'responseId' => '',
             'correlationId' => '',
             'warning' => '',
+            'feedback' => false,
         ], $data);
     }
 }

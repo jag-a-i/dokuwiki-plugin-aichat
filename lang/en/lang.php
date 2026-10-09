@@ -18,3 +18,14 @@ $lang['js']['error'] = 'Sorry, something went wrong';
 
 $lang['error'] = 'Sorry, the AI chat service is currently unavailable. Please try again later. Reference: %s';
 $lang['sectok'] = 'Your session has expired. Please reload the page and try again. Reference: %s';
+
+$lang['js']['feedback_question'] = 'Was this answer helpful?';
+$lang['js']['feedback_helpful'] = 'Helpful';
+$lang['js']['feedback_not_helpful'] = 'Not helpful';
+$lang['js']['feedback_saved'] = 'Thanks, your feedback was saved.';
+$lang['js']['feedback_error'] = 'Sorry, your feedback could not be saved.';
+$lang['js']['feedback_reason'] = 'What was wrong? (optional)';
+$lang['js']['feedback_cat_wrong_answer'] = 'Wrong answer';
+$lang['js']['feedback_cat_missing_information'] = 'Missing information';
+$lang['js']['feedback_cat_wrong_source'] = 'Wrong source';
+$lang['js']['feedback_cat_unclear'] = 'Unclear explanation';
