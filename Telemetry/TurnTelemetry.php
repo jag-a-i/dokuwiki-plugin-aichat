@@ -42,7 +42,7 @@ class TurnTelemetry
     {
         $capture = [];
         if ($this->exportEnabled()) {
-            $capture = array_filter(array_map('trim', explode(',', (string)($this->conf['telemetry_capture'] ?? ''))));
+            $capture = ExporterFactory::capturePolicy($this->conf);
         }
         return new TraceRecorder($capture);
     }
@@ -52,11 +52,12 @@ class TurnTelemetry
         if (!$this->exporterBuilt) {
             $this->exporterBuilt = true;
             try {
-                $spool = new Spool(
-                    $this->metaDir . '/spool',
-                    (int)($this->conf['telemetry_spool_max'] ?? 100),
-                    (int)($this->conf['telemetry_spool_days'] ?? 3) * 86400
-                );
+                // one namespace per destination + credentials + capture policy (see spoolNamespace)
+                $root = $this->metaDir . '/spool';
+                $ns = ExporterFactory::spoolNamespace($this->conf);
+                $maxAge = (int)($this->conf['telemetry_spool_days'] ?? 3) * 86400;
+                Spool::cleanupObsolete($root, $ns, $maxAge);
+                $spool = new Spool($root . '/' . $ns, (int)($this->conf['telemetry_spool_max'] ?? 100), $maxAge);
                 $this->exporter = ExporterFactory::create($this->conf, $this->http ?: ExporterFactory::dokuHttp(), $spool);
             } catch (\Throwable $e) {
                 $this->exporter = null;
@@ -113,7 +114,15 @@ class TurnTelemetry
     /** export the finished trace; returns the exporter's status or a reason */
     public function export(TraceRecorder $trace, string $sessionId, string $release): string
     {
-        if (!$this->exportEnabled()) return 'disabled';
+        if (!$this->exportEnabled()) {
+            // retention still applies to backlogs of earlier configurations (never sent)
+            try {
+                Spool::cleanupObsolete($this->metaDir . '/spool', '', (int)($this->conf['telemetry_spool_days'] ?? 3) * 86400);
+            } catch (\Throwable $e) {
+                // ignore
+            }
+            return 'disabled';
+        }
         try {
             $exporter = $this->getExporter();
             if (!$exporter) return 'not_configured';

@@ -132,9 +132,18 @@ the installed production revision and settings are unknown. Tested only in a san
   privacy decision; captured text is secret-redacted best-effort. User names, IPs and credentials
   are never exported.
 - Bounded: `telemetry_timeout` seconds per attempt (1-10), `telemetry_retries` (0-2; 4xx except 429
-  is not retried); failed traces go to a spool (`data/meta/aichat/spool/`, max
+  is not retried); failed traces go to a spool (`data/meta/aichat/spool/<namespace>/`, max
   `telemetry_spool_max` files, `telemetry_spool_days` days) and up to 2 are re-sent after the next
-  successful export. Export runs after the answer was sent (`fastcgi_finish_request` under FPM);
+  successful export.
+- Spool provenance: the namespace is a one-way hash of backend, endpoint URL, credential identity and
+  capture policy (no URL or key in clear text on disk). Queued traces are ONLY re-sent to exactly the
+  same combination. After changing the endpoint, project keys, backend or `telemetry_capture`, older
+  backlogs are never sent anywhere (no automatic migration); they are deleted once older than
+  `telemetry_spool_days`, at most 5 obsolete namespaces are kept, and spool files from earlier
+  plugin versions (no provenance) are never sent and expire the same way. Retention cleanup also runs
+  while export is off. Operator option: delete `data/meta/aichat/spool/` to discard all backlogs
+  immediately; restoring the previous configuration within the retention period resumes delivery of
+  that configuration's own backlog. Export runs after the answer was sent (`fastcgi_finish_request` under FPM);
   with mod_php the request still finishes the export before the worker is freed.
 - Redirects are never followed (security): DokuWiki's HTTP client would otherwise re-send the
   Authorization header and, for 307/308, the trace body to whatever host a redirect names

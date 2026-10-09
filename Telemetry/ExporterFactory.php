@@ -51,6 +51,39 @@ class ExporterFactory
         }
     }
 
+    /** normalized list of enabled content capture kinds */
+    public static function capturePolicy(array $conf): array
+    {
+        if (($conf['telemetry'] ?? 'off') === 'off') return [];
+        $kinds = array_filter(array_map('trim', explode(',', (string)($conf['telemetry_capture'] ?? ''))));
+        $kinds = array_values(array_unique(array_intersect($kinds, TraceRecorder::CONTENT_KINDS)));
+        sort($kinds);
+        return $kinds;
+    }
+
+    /**
+     * Spool namespace = provenance of queued payloads: backend, endpoint, credential identity and
+     * capture policy. Payloads are only ever flushed to EXACTLY the same combination, so changing the
+     * destination, project keys, backend or capture policy never sends an old backlog anywhere.
+     * Only a one-way hash is used; no URL or key is stored in clear text.
+     */
+    public static function spoolNamespace(array $conf): string
+    {
+        $backend = (string)($conf['telemetry'] ?? 'off');
+        $endpoint = rtrim(trim((string)($conf['telemetry_endpoint'] ?? '')), '/');
+        $cred = $backend === 'langfuse'
+            ? (string)($conf['telemetry_langfuse_public'] ?? '') . ':' . (string)($conf['telemetry_langfuse_secret'] ?? '')
+            : (string)($conf['telemetry_otlp_authorization'] ?? '');
+        $id = json_encode([
+            'v' => 1,
+            'backend' => $backend,
+            'endpoint' => strtolower($endpoint),
+            'credential' => hash('sha256', 'aichat-spool-cred|' . $cred),
+            'capture' => self::capturePolicy($conf),
+        ]);
+        return substr(hash('sha256', 'aichat-spool|' . $id), 0, 32);
+    }
+
     /**
      * Default transport for telemetry (credential-safe):
      *

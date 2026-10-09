@@ -28,13 +28,22 @@ version accepting OTLP/HTTP JSON is required, the local stand-in is described as
 and an operator preflight (`aichat_telemetry --yes`, Telemetry\Preflight) with contract tests was added.
 Protobuf encoding was deliberately not implemented.
 
+Independent review (P2 privacy, FIXED): the spool was shared and had no provenance, so after a failed export
+with content capture, changing the endpoint/project/backend or narrowing capture let the next metadata-only run
+flush the old captured payloads to the NEW destination with the current credentials. Now each destination +
+credential + capture-policy combination has its own hashed namespace; backlogs are only flushed to exactly the
+same configuration, never migrated, and expire by age (bounded number of namespaces; legacy flat files never
+sent). Regression: queued PRIVATE marker under A with capture; B (other endpoint, other keys on the same
+endpoint, narrowed/changed capture, other backend, other path) never receives it; positive control flushes to A.
+
 Findings of this pass:
 - FIXED: remote `similar` sent the query unredacted to the embedding endpoint (`ask` already redacted).
 - FIXED (packaging): upstream `.gitattributes` export-ignores `_test/`; earlier checkpoint zips made with
   `git archive` therefore contained no tests. The review package now includes a full source archive.
 - OPEN/DOCUMENTED: no rate limiting for chat or feedback requests (as upstream). Consider web-server limits.
 - OPEN/DOCUMENTED: with `telemetry_capture` enabled, undelivered traces containing that content are kept in
-  `data/meta/aichat/spool/` (bounded, max age); default capture is off.
+  `data/meta/aichat/spool/<namespace>/` (bounded, max age, only re-sent to the same configuration); default
+  capture is off.
 - OPEN/DOCUMENTED: under mod_php the request waits for the trace export (timeout x (retries+1)); under FPM the
   answer is sent first.
 - OPEN/DOCUMENTED: pre-existing opt-in `logging` still writes answers, IP and user name; not changed to avoid

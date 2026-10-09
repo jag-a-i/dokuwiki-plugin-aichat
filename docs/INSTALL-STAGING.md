@@ -62,6 +62,7 @@ cp "local.php.$TS" "$WIKI/conf/local.php"     # only if settings were changed
 touch "$WIKI/conf/local.php"
 ```
 Data created by this version and safe to delete after rollback: `data/meta/aichat/responses/`
-(local response records with votes) and `data/meta/aichat/spool/` (undelivered traces).
+(local response records with votes) and `data/meta/aichat/spool/` (undelivered traces, one hashed
+sub-directory per endpoint/credential/capture configuration; never sent to a different configuration).
 Pending clarifications live only in PHP sessions and expire after 15 minutes.
 Unknown new settings left in `conf/local.php` are ignored by the old version.
