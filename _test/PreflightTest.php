@@ -55,6 +55,25 @@ class PreflightTest extends \DokuWikiTest
         $this->assertCount($attempts, $this->sent, 'bounded attempts (4xx/3xx not retried)');
     }
 
+    public function testPreflightReportsPartialSuccess()
+    {
+        $r = Preflight::run($this->conf(), function ($url, $headers, $body) {
+            $this->sent[] = compact('url', 'headers', 'body');
+            return ['status' => 200, 'body' => '{"partialSuccess":{"rejectedSpans":"2","errorMessage":"x"}}'];
+        });
+        $this->assertFalse($r['ok']);
+        $this->assertSame('partial', $r['result']);
+        $this->assertStringContainsString('rejected 2 span(s)', $r['message']);
+        $this->assertCount(1, $this->sent);
+    }
+
+    public function testPreflightFlagsUnverifiableSuccessBody()
+    {
+        $r = Preflight::run($this->conf(), fn() => ['status' => 200, 'body' => 'not json']);
+        $this->assertTrue($r['ok']);
+        $this->assertStringContainsString('partial acceptance could not be checked', $r['message']);
+    }
+
     public function testPreflightSendsOnlySyntheticMetadata()
     {
         Preflight::run($this->conf(), $this->http(200));

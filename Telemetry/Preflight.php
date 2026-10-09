@@ -27,8 +27,17 @@ class Preflight
         $t->finish(['outcome' => 'PREFLIGHT', 'correlation_id' => 'preflight']);
         $ok = $exporter->export($t->toArray() + ['sessionId' => 'aichat-preflight', 'release' => 'preflight']);
         $status = $exporter instanceof OtlpHttpExporter ? $exporter->lastStatus : ($ok ? 200 : 0);
-        return ['ok' => $ok, 'status' => $status, 'result' => $ok ? 'accepted' : 'rejected',
-            'message' => self::explain($status, $exporter->getName())];
+        $last = $exporter instanceof OtlpHttpExporter ? $exporter->last : [];
+        if ($ok && ($last['result'] ?? '') === 'partial') {
+            return ['ok' => false, 'status' => $status, 'result' => 'partial',
+                'message' => 'Partially accepted (HTTP ' . $status . '): the endpoint rejected ' . (int)$last['rejected_spans'] .
+                    ' span(s) (OTLP partialSuccess). Check the backend version, attribute limits and its logs.'];
+        }
+        $message = self::explain($status, $exporter->getName());
+        if ($ok && ($last['response'] ?? 'ok') === 'malformed') {
+            $message .= ' Note: the response body was not an OTLP/JSON response, so partial acceptance could not be checked.';
+        }
+        return ['ok' => $ok, 'status' => $status, 'result' => $ok ? 'accepted' : 'rejected', 'message' => $message];
     }
 
     public static function explain(int $status, string $backend): string

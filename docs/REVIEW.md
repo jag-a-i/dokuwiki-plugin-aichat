@@ -36,6 +36,11 @@ same configuration, never migrated, and expire by age (bounded number of namespa
 sent). Regression: queued PRIVATE marker under A with capture; B (other endpoint, other keys on the same
 endpoint, narrowed/changed capture, other backend, other path) never receives it; positive control flushes to A.
 
+Independent review (OTLP compliance, FIXED): every 2xx was treated as full success, so an OTLP
+`partialSuccess` with rejected spans silently lost traces. The transport now returns the (bounded)
+body; partial success is recorded as a sanitized count and never retried. While wiring this, the real-
+transport tests caught a TypeError (closure return type `int`) that the mocked tests could not see.
+
 Findings of this pass:
 - FIXED: remote `similar` sent the query unredacted to the embedding endpoint (`ask` already redacted).
 - FIXED (packaging): upstream `.gitattributes` export-ignores `_test/`; earlier checkpoint zips made with

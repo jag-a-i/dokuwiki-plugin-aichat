@@ -99,13 +99,13 @@ class ExporterFactory
      */
     public static function dokuHttp(): callable
     {
-        return static function (string $url, array $headers, string $body, int $timeout): int {
+        return static function (string $url, array $headers, string $body, int $timeout): int|array {
             $scheme = strtolower((string)parse_url($url, PHP_URL_SCHEME));
             if (!in_array($scheme, ['http', 'https'], true)) return 0;
             $http = self::client($timeout);
             $http->headers = array_merge($http->headers, $headers);
             $http->sendRequest($url, $body, 'POST');
-            return (int)$http->status;
+            return ['status' => (int)$http->status, 'body' => (string)$http->resp_body];
         };
     }
 
@@ -125,6 +125,8 @@ class ExporterFactory
         $http->keep_alive = false;
         $http->max_redirect = 0;
         $http->debug = false;
+        $http->max_bodysize = 65536;          // responses are small (OTLP ExportTraceServiceResponse)
+        $http->max_bodysize_abort = true;
         return $http;
     }
 }

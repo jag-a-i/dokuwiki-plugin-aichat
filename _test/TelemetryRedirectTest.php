@@ -46,14 +46,15 @@ class TelemetryRedirectTest extends \DokuWikiTest
     }
 
     /** start a local server; returns [port, logfile] */
-    protected function server(int $status, ?string $location = null, ?array $tls = null): array
+    protected function server(int $status, ?string $location = null, ?array $tls = null, string $responseBody = ''): array
     {
         $port = $this->freePort();
         $log = $this->dir . "/srv-$port.log";
         touch($log);
         $cmd = array_merge(['python3', __DIR__ . '/Fixtures/http_test_server.py', (string)$port, $log, (string)$status, $location ?? '-'],
             $tls ?? []);
-        $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['file', $this->dir . "/srv-$port.err", 'w']], $pipes);
+        $env = array_merge(getenv(), ['RESPONSE_BODY' => $responseBody]);
+        $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['file', $this->dir . "/srv-$port.err", 'w']], $pipes, null, $env);
         $this->procs[] = $proc;
         $this->assertSame("ready\n", fgets($pipes[1]), 'server started');
         return [$port, $log];
@@ -190,5 +191,20 @@ class TelemetryRedirectTest extends \DokuWikiTest
             $this->assertSame('application/json', $req[0]['headers']['content-type']);
             $this->assertSame('/api/public/otel/v1/traces', $req[0]['path']);
         }
+    }
+
+    /** partialSuccess in a real HTTP response body reaches the exporter through the real transport */
+    public function testPartialSuccessOverRealTransport()
+    {
+        [$eport, $elog] = $this->server(200, null, null, '{"partialSuccess":{"rejectedSpans":"1","errorMessage":"limit"}}');
+        $e = \dokuwiki\plugin\aichat\Telemetry\ExporterFactory::create([
+            'telemetry' => 'otlp', 'telemetry_endpoint' => "http://127.0.0.1:$eport/v1/traces", 'telemetry_retries' => 2,
+        ], \dokuwiki\plugin\aichat\Telemetry\ExporterFactory::dokuHttp());
+        $t = new \dokuwiki\plugin\aichat\Telemetry\TraceRecorder();
+        $t->finish(['outcome' => 'ANSWER']);
+        $this->assertTrue($e->export($t->toArray() + ['sessionId' => 's', 'release' => 'r']));
+        $this->assertSame('partial', $e->last['result']);
+        $this->assertSame(1, $e->last['rejected_spans']);
+        $this->assertCount(1, $this->requests($elog), 'not retried');
     }
 }

@@ -135,6 +135,12 @@ the installed production revision and settings are unknown. Tested only in a san
   is not retried); failed traces go to a spool (`data/meta/aichat/spool/<namespace>/`, max
   `telemetry_spool_max` files, `telemetry_spool_days` days) and up to 2 are re-sent after the next
   successful export.
+- OTLP partial success (opentelemetry.io/docs/specs/otlp/#partial-success-1): a 2xx response body with
+  `partialSuccess.rejectedSpans > 0` (lowerCamelCase or snake_case, int64 as string accepted) is
+  recorded as `result=partial` with the rejected count; the batch is not retried or spooled (that would
+  duplicate the accepted spans). The server's `errorMessage` is not stored. Empty or non-JSON 2xx
+  bodies count as accepted but are flagged (`response=empty|malformed`); the preflight reports partial
+  acceptance as a failure. Responses are read up to 64 KB.
 - Spool provenance: the namespace is a one-way hash of backend, endpoint URL, credential identity and
   capture policy (no URL or key in clear text on disk). Queued traces are ONLY re-sent to exactly the
   same combination. After changing the endpoint, project keys, backend or `telemetry_capture`, older

@@ -17,7 +17,10 @@ class OtlpHttpExporter implements ExporterInterface
 
     protected string $url;
     protected array $headers;
-    /** @var callable(string $url, array $headers, string $body, int $timeout): int  HTTP status, 0 on transport error */
+    /**
+     * @var callable(string $url, array $headers, string $body, int $timeout): (int|array)
+     *      HTTP status (0 on transport error) or ['status' => int, 'body' => string]
+     */
     protected $http;
     protected int $timeout;
     protected int $retries;
@@ -26,6 +29,10 @@ class OtlpHttpExporter implements ExporterInterface
     public array $last = [];
     /** HTTP status of the last attempt (0 = transport error) */
     public int $lastStatus = 0;
+    /** body of the last response (bounded by the transport) */
+    protected string $lastBody = '';
+    /** @var array sanitized OTLP partial success info of the last accepted request */
+    public array $lastAcceptance = [];
 
     public function __construct(string $url, array $headers, callable $http, int $timeout = 2, int $retries = 1, ?Spool $spool = null)
     {
@@ -51,8 +58,12 @@ class OtlpHttpExporter implements ExporterInterface
             return false;
         }
         if ($this->send($payload)) {
-            $this->last = ['result' => 'sent', 'flushed' => $this->flush()];
-            return true;
+            $acceptance = $this->lastAcceptance;
+            $this->last = ['result' => $acceptance['partial'] ? 'partial' : 'sent'];
+            if ($acceptance['partial']) $this->last['rejected_spans'] = $acceptance['rejected_spans'];
+            if ($acceptance['response'] !== 'ok') $this->last['response'] = $acceptance['response'];
+            $this->last['flushed'] = $this->flush();
+            return true; // accepted (fully or partially): never resent, a retry would duplicate accepted spans
         }
         $spooled = $this->spool ? $this->spool->push($payload) : false;
         $this->last = ['result' => $spooled ? 'spooled' : 'dropped'];
@@ -69,7 +80,7 @@ class OtlpHttpExporter implements ExporterInterface
             $payload = $this->spool->read($file);
             if ($payload === null) continue;
             if (!$this->send($payload, 0)) break;
-            $this->spool->remove($file);
+            $this->spool->remove($file); // also on partial success: no resend of accepted spans
             $sent++;
         }
         return $sent;
@@ -80,18 +91,65 @@ class OtlpHttpExporter implements ExporterInterface
         $headers = array_merge(['Content-Type' => 'application/json'], $this->headers);
         $attempts = 1 + ($retries ?? $this->retries);
         for ($i = 0; $i < $attempts; $i++) {
+            $body = '';
             try {
-                $status = (int)($this->http)($this->url, $headers, $payload, $this->timeout);
+                $resp = ($this->http)($this->url, $headers, $payload, $this->timeout);
+                if (is_array($resp)) {
+                    $status = (int)($resp['status'] ?? 0);
+                    $body = (string)($resp['body'] ?? '');
+                } else {
+                    $status = (int)$resp;
+                }
             } catch (\Throwable $e) {
                 $status = 0;
             }
             $this->lastStatus = $status;
-            if ($status >= 200 && $status < 300) return true;
+            $this->lastBody = $body;
+            if ($status >= 200 && $status < 300) {
+                $this->lastAcceptance = self::parseAcceptance($body);
+                return true;
+            }
             // redirects are never followed (credentials/body must not reach other hosts): fail closed
             if ($status >= 300 && $status < 400) return false;
             if ($status >= 400 && $status < 500 && $status !== 429) return false; // not retryable
         }
         return false;
+    }
+
+    /**
+     * Interpret a 2xx body per OTLP/HTTP (ExportTraceServiceResponse, JSON): partialSuccess with
+     * rejectedSpans > 0 means some spans were dropped by the server. Accepts lowerCamelCase (spec) and
+     * snake_case keys; int64 may be a JSON string. The server's errorMessage is NOT stored (it may echo
+     * payload content); only whether one was present.
+     *
+     * @return array ['partial' => bool, 'rejected_spans' => int, 'error_message' => bool,
+     *                'response' => ok|empty|malformed]
+     */
+    public static function parseAcceptance(string $body): array
+    {
+        $out = ['partial' => false, 'rejected_spans' => 0, 'error_message' => false, 'response' => 'ok'];
+        if (trim($body) === '') {
+            $out['response'] = 'empty';
+            return $out;
+        }
+        $json = json_decode($body, true);
+        if (!is_array($json)) {
+            $out['response'] = 'malformed'; // e.g. protobuf or HTML: accepted (2xx) but not verifiable
+            return $out;
+        }
+        $ps = $json['partialSuccess'] ?? $json['partial_success'] ?? null;
+        if ($ps === null) return $out;
+        if (!is_array($ps)) {
+            $out['response'] = 'malformed';
+            return $out;
+        }
+        $rej = $ps['rejectedSpans'] ?? $ps['rejected_spans'] ?? 0;
+        $rej = is_numeric($rej) ? max(0, (int)$rej) : 0;
+        $msg = $ps['errorMessage'] ?? $ps['error_message'] ?? '';
+        $out['rejected_spans'] = $rej;
+        $out['partial'] = $rej > 0;
+        $out['error_message'] = is_string($msg) && $msg !== '';
+        return $out;
     }
 
     /** attributes added to every span (trace level attributes must be propagated) */

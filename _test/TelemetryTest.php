@@ -143,7 +143,7 @@ class TelemetryTest extends \DokuWikiTest
 
         $this->statuses = [200, 200];
         $this->assertTrue($e->export($this->trace()));
-        $this->assertSame(['result' => 'sent', 'flushed' => 1], $e->last);
+        $this->assertSame(['result' => 'sent', 'response' => 'empty', 'flushed' => 1], $e->last, 'status-only mock: no body to inspect');
         $this->assertSame(0, $spool->count());
         $this->assertCount(4, $this->sent);
     }
@@ -163,8 +163,64 @@ class TelemetryTest extends \DokuWikiTest
         // flushing stops at the first refused redirect instead of looping
         $this->statuses = [200, 302];
         $e->export($this->trace());
-        $this->assertSame(['result' => 'sent', 'flushed' => 0], $e->last);
+        $this->assertSame(['result' => 'sent', 'response' => 'empty', 'flushed' => 0], $e->last, 'status-only mock: no body to inspect');
         $this->assertSame(2, $spool->count());
+    }
+
+    public function provideAcceptanceBodies(): array
+    {
+        return [
+            'full success, empty object' => ['{}', 'sent', 0, 'ok'],
+            'full success, empty body' => ['', 'sent', 0, 'empty'],
+            'partial, lowerCamelCase, int64 as string' => ['{"partialSuccess":{"rejectedSpans":"3","errorMessage":"attr too long: SECRET-ECHO"}}', 'partial', 3, 'ok'],
+            'partial, snake_case' => ['{"partial_success":{"rejected_spans":2}}', 'partial', 2, 'ok'],
+            'warning only (0 rejected)' => ['{"partialSuccess":{"rejectedSpans":0,"errorMessage":"deprecated attr"}}', 'sent', 0, 'ok'],
+            'malformed body' => ['<html>ok</html>', 'sent', 0, 'malformed'],
+            'malformed partialSuccess' => ['{"partialSuccess":"nope"}', 'sent', 0, 'malformed'],
+        ];
+    }
+
+    /** OTLP partial success (opentelemetry.io/docs/specs/otlp/#partial-success-1) @dataProvider provideAcceptanceBodies */
+    public function testPartialSuccessIsRecordedAndNeverResent(string $body, string $result, int $rejected, string $response)
+    {
+        $spool = new Spool($this->spoolDir, 5);
+        $calls = 0;
+        $http = function () use ($body, &$calls) { $calls++; return ['status' => 200, 'body' => $body]; };
+        $e = LangfuseExporter::create('https://lf.example.invalid', 'pk', 'sk', $http, 2, 2, $spool);
+        $this->assertTrue($e->export($this->trace()));
+        $this->assertSame(1, $calls, 'never retried (would duplicate accepted spans)');
+        $this->assertSame(0, $spool->count(), 'never spooled');
+        $this->assertSame($result, $e->last['result']);
+        $this->assertSame($rejected, $e->last['rejected_spans'] ?? 0);
+        $this->assertSame($response, $e->last['response'] ?? 'ok');
+        $this->assertStringNotContainsString('SECRET-ECHO', json_encode([$e->last, $e->lastAcceptance]), 'server message not stored');
+    }
+
+    public function testPartialSuccessDuringFlushRemovesSpooledPayload()
+    {
+        $spool = new Spool($this->spoolDir, 5);
+        $e = LangfuseExporter::create('https://lf.example.invalid', 'pk', 'sk', $this->http(), 2, 0, $spool);
+        $this->statuses = [503];
+        $e->export($this->trace());
+        $this->assertSame(1, $spool->count());
+        $responses = [['status' => 200, 'body' => '{}'], ['status' => 200, 'body' => '{"partialSuccess":{"rejectedSpans":1}}']];
+        $calls = 0;
+        $e2 = LangfuseExporter::create('https://lf.example.invalid', 'pk', 'sk', function () use (&$responses, &$calls) {
+            $calls++;
+            return array_shift($responses) ?? ['status' => 200, 'body' => '{}'];
+        }, 2, 0, $spool);
+        $e2->export($this->trace());
+        $this->assertSame(2, $calls);
+        $this->assertSame(1, $e2->last['flushed']);
+        $this->assertSame(0, $spool->count(), 'partially accepted backlog is not resent again');
+    }
+
+    public function testLegacyIntTransportStillSupported()
+    {
+        $e = LangfuseExporter::create('https://lf.example.invalid', 'pk', 'sk', fn() => 204);
+        $this->assertTrue($e->export($this->trace()));
+        $this->assertSame('sent', $e->last['result']);
+        $this->assertSame('empty', $e->last['response']);
     }
 
     public function testClientErrorIsNotRetried()
