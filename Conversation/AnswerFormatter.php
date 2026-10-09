@@ -46,14 +46,6 @@ class AnswerFormatter
         // citation markers
         $answer = preg_replace('/\s?\[\s*S\d{1,3}(?:\s*,\s*S\d{1,3})*\s*\]/i', '', $answer);
 
-        // markdown links to non-permitted wiki pages -> keep text only
-        $allowed = array_flip($allowedPages);
-        $answer = preg_replace_callback('/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/', function ($m) use ($allowed) {
-            $page = ($this->wikiPageFromUrl)($m[2]);
-            if ($page !== null && !isset($allowed[$page])) return $m[1];
-            return $m[0];
-        }, $answer);
-
         // trailing footer copies / source sections
         $lines = explode("\n", rtrim($answer));
         while ($lines) {
@@ -69,6 +61,14 @@ class AnswerFormatter
             break;
         }
         $answer = implode("\n", $lines);
+        // markdown links to non-permitted wiki pages -> keep text only
+        $allowed = array_flip($allowedPages);
+        $answer = preg_replace_callback('/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/', function ($m) use ($allowed) {
+            $page = ($this->wikiPageFromUrl)($m[2]);
+            if ($page !== null && !isset($allowed[$page])) return $m[1];
+            return $m[0];
+        }, $answer);
+
         // footer sentence anywhere else in the text (model repeated it mid-answer)
         $answer = preg_replace('/^[\s>*_#-]*please see the following articles for more information:?[\s*_]*$/mi', '', $answer);
         $answer = preg_replace("/\n{3,}/", "\n\n", $answer);

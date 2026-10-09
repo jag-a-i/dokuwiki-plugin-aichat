@@ -24,15 +24,18 @@ class SessionBridgeTest extends \DokuWikiTest
         $this->assertIsArray($r, (string)$out);
 
         $this->assertTrue($r['persisted']);
-        $this->assertTrue($r['closedAfterWrite'], 'session must not stay open (e.g. across model calls)');
-        $this->assertSame('changed-by-request-b', $r['stored']['other'], 'fresh data kept, stale snapshot not written back');
-        $this->assertSame('b', $r['stored']['login']);
-        $this->assertArrayNotHasKey('stale_only', $r['stored']);
-        $this->assertSame(['tabAAAAAAAA' => ['id' => 'p1']], $r['aliceRead']);
+        $this->assertTrue($r['closedAfterWrite'], 'session lock released right after the write');
+        $this->assertSame('changed-by-b', $r['other'], 'fresh data kept');
+        $this->assertFalse($r['staleWritten'], 'stale snapshot not written back');
+        $this->assertSame(['tabAAAAAAAA', 'tabBBBBBBBB', 'tabCCCCCCCC'], $r['afterOverlap'], 'no lost update between tabs');
+        $this->assertSame(['tabAAAAAAAA', 'tabCCCCCCCC'], $r['afterDelete']);
+        $this->assertFalse($r['lateWriteAfterLogout'], 'late write after logout refused');
+        $this->assertNotContains('tabDDDDDDDD', $r['aliceAfterLogout'], 'no resurrection');
+        $this->assertSame([], $r['guestRead'], 'logged-out identity sees nothing');
+        $this->assertSame([], $r['aliceAfterGuestWrite'], 'other identities dropped on write');
+        $this->assertSame(1, $r['identities']);
         $this->assertSame([], $r['bobRead'], 'other user');
-        $this->assertSame([], $r['guestRead'], 'after logout');
         $this->assertSame([], $r['aliceOtherSessionRead'], 'other session');
-        $this->assertCount(1, $r['stored'][SessionBridge::SESSION_KEY]['pending']);
         array_map('unlink', glob("$dir/*"));
         rmdir($dir);
     }
@@ -41,9 +44,9 @@ class SessionBridgeTest extends \DokuWikiTest
     {
         $_SESSION = [];
         $b = new SessionBridge('alice', '', static fn() => false);
-        $this->assertFalse($b->write(['x' => ['id' => '1']]));
-        $this->assertSame(['x' => ['id' => '1']], $b->read());
-        $b->write([]);
+        $this->assertFalse($b->writeConversation('x', ['id' => '1', 'created' => 1]));
+        $this->assertSame(['x' => ['id' => '1', 'created' => 1]], $b->read());
+        $b->writeConversation('x', null);
         $this->assertSame([], $_SESSION[SessionBridge::SESSION_KEY]['pending']);
     }
 }

@@ -21,7 +21,7 @@ class PendingStore
 
     /** @var array */
     protected $store;
-    /** @var callable|null persists after write (e.g. reopen + close the session) */
+    /** @var callable|null persist(string $conversation, ?array $item): per-conversation write (null = delete) */
     protected $persist;
     /** @var callable returns current unix time */
     protected $clock;
@@ -83,7 +83,7 @@ class PendingStore
         while (count($this->store) > self::MAX_CONVERSATIONS) {
             array_shift($this->store);
         }
-        $this->save();
+        $this->save($conversation, $this->store[$conversation]);
         return $id;
     }
 
@@ -91,12 +91,12 @@ class PendingStore
     {
         if (isset($this->store[$conversation])) {
             unset($this->store[$conversation]);
-            $this->save();
+            $this->save($conversation, null);
         }
     }
 
-    protected function save(): void
+    protected function save(string $conversation, ?array $item): void
     {
-        if ($this->persist) ($this->persist)($this->store);
+        if ($this->persist) ($this->persist)($conversation, $item);
     }
 }

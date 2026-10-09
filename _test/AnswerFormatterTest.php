@@ -49,4 +49,12 @@ class AnswerFormatterTest extends \DokuWikiTest
         $out = $this->formatter()->format($in, []);
         $this->assertStringContainsString('- https://b.example.invalid', $out);
     }
+
+    // regression found by the browser E2E: trailing source list with a non-permitted wiki link
+    public function testTrailingSourceListWithForbiddenWikiLinkRemoved()
+    {
+        $in = "Synthetic answer.\n\nPlease see the following articles for more information:\n\nSources:\n- [Secret](/doku.php?id=it:hr:password)";
+        $out = $this->formatter()->format($in, ['it:vpn:password']);
+        $this->assertSame("Synthetic answer.\n\n" . Outcome::FOOTER_TEXT, $out);
+    }
 }

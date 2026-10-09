@@ -85,4 +85,35 @@ class RemoteTest extends \DokuWikiTest
         plugin_load('remote', 'aichat')->ask('my vpn password is Hunter2!x how to change');
         $this->assertStringNotContainsString('Hunter2!x', json_encode($this->chat->calls));
     }
+
+    public function testSimilarErrorDoesNotLeak()
+    {
+        global $conf;
+        $failing = new class extends \dokuwiki\plugin\aichat\Embeddings {
+            public function __construct() {}
+            public function getSimilarChunks($query, $lang = '', $limits = true)
+            {
+                throw new \RuntimeException('qdrant https://q.internal:6333 api-key=SIMKEY chunk text');
+            }
+        };
+        $helper = plugin_load('helper', 'aichat');
+        $prop = new \ReflectionProperty($helper, 'embeddings');
+        $prop->setAccessible(true);
+        $old = $prop->getValue($helper);
+        $prop->setValue($helper, $failing);
+        try {
+            plugin_load('remote', 'aichat')->similar('anything');
+            $this->fail('expected RemoteException');
+        } catch (RemoteException $e) {
+            $this->assertSame(112, $e->getCode());
+            $this->assertMatchesRegularExpression('/^AI chat service error\. Reference: ([0-9a-f]{16})$/', $e->getMessage());
+            preg_match('/([0-9a-f]{16})$/', $e->getMessage(), $m);
+            $log = @file_get_contents($conf['logdir'] . '/error/' . date('Y-m-d') . '.log') ?: '';
+            $this->assertStringContainsString("aichat remote similar error: category=backend_error ref={$m[1]}", $log);
+            $this->assertStringNotContainsString('SIMKEY', $log);
+            $this->assertStringNotContainsString('q.internal', $log);
+        } finally {
+            $prop->setValue($helper, $old);
+        }
+    }
 }

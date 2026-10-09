@@ -37,6 +37,26 @@ the installed production revision and settings are unknown. Tested only in a san
   IP and username when enabled - a known privacy issue, see the separate migration proposal).
   It now logs the redacted question and nothing for ERROR outcomes.
 
+## Session state concurrency
+- Writes are per conversation: the session is reopened, only that conversation's entry is set or
+  removed in the fresh locked data, and the session is closed again. Overlapping requests from other
+  tabs do not lose each other's state. Entries of other identities are dropped on write.
+- If the session login changed while a request was running (logout, re-login, user switch), the
+  late write is refused, so stale state cannot be resurrected. Setups that do not keep the login in
+  the session (SSO, HTTP auth) are unaffected because fresh and start-of-request values are compared.
+
+## Browser end-to-end test
+- `_test/e2e/run_e2e.sh <dokuwiki-src> <sqlite-plugin>` builds a throw-away synthetic site and drives
+  the real UI in headless Chromium (Playwright for Python) against a local synthetic
+  OpenAI-compatible mock. It purges DokuWiki's JS cache first: the combined bundle is cached and
+  `script.js` pulls in `script/AIChatChat.js` via an include, so a stale bundle can hide JS changes.
+
+## Pre-existing upstream issues observed (not changed here)
+- `SQLiteStorage::createLanguageClusters()` returns inside an open transaction when there are no
+  embeddings; the following VACUUM then fails ("cannot VACUUM from within a transaction").
+- Pages smaller than 150 bytes are never embedded (`Embeddings::createNewIndex`). Short wiki pages
+  are therefore invisible to the chat.
+
 ## Known limits
 - Secret detection is pattern based ("password is X", common token formats). A bare password
   typed without context is not detected.

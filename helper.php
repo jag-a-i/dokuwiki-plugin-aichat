@@ -333,7 +333,10 @@ class helper_plugin_aichat extends Plugin
         global $INPUT;
         $bridge = new SessionBridge($INPUT->server->str('REMOTE_USER'));
         $this->pendingData = $bridge->read();
-        return new PendingStore($this->pendingData, static fn(array $data) => $bridge->write($data));
+        return new PendingStore(
+            $this->pendingData,
+            static fn(string $conversation, ?array $item) => $bridge->writeConversation($conversation, $item)
+        );
     }
 
     /**

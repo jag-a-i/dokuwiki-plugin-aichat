@@ -277,6 +277,15 @@ class AIChatChat extends HTMLElement {
     }
 
     /**
+     * Get the current page context if enabled, empty string otherwise
+     *
+     * @returns {string}
+     */
+    getPageContext() {
+        return this.#pagecontext.classList.contains('off') ? '' : JSINFO.id;
+    }
+
+    /**
      * Submit the form
      *
      * @param event
