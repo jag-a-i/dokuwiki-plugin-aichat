@@ -24,7 +24,6 @@ class ActionTest extends \DokuWikiTest
     protected $pluginsEnabled = ['aichat', 'sqlite'];
 
     public static ?array $captured = null;
-    protected static bool $hooked = false;
     protected SyntheticWiki $wiki;
     protected FakeChatModel $chat;
     protected array $rephraseInputs = [];
@@ -49,14 +48,12 @@ class ActionTest extends \DokuWikiTest
             // stands in for the rephrase model; records what it would receive
             'rephraser' => function ($q, $h) { $this->rephraseInputs[] = $h; return $q; },
         ]);
-        if (!self::$hooked) {
-            global $EVENT_HANDLER;
-            // runs at the end of the real AJAX request: capture the session as written by the plugin
-            $EVENT_HANDLER->register_hook('AJAX_CALL_UNKNOWN', 'AFTER', null, static function () {
-                ActionTest::$captured = $_SESSION ?? [];
-            });
-            self::$hooked = true;
-        }
+        // the test base recreates the event handler for every test, so register the capture hook every time;
+        // it runs at the end of the real AJAX request and captures the session as written by the plugin
+        global $EVENT_HANDLER;
+        $EVENT_HANDLER->register_hook('AJAX_CALL_UNKNOWN', 'AFTER', null, static function () {
+            ActionTest::$captured = $_SESSION ?? [];
+        });
         self::$captured = null;
     }
 
@@ -119,6 +116,35 @@ class ActionTest extends \DokuWikiTest
         $this->assertStringContainsString('(VPN)', $this->chat->lastPrompt());
     }
 
+    public function testDoubleSubmitOfAPendingChoiceUsesItOnce()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nRun vpnctl.");
+        [$r1, $session] = $this->post(['question' => 'How do I change my password?']);
+        $this->assertNotEmpty($session[SessionBridge::SESSION_KEY]['pending'] ?? [], 'state really stored');
+        $post = ['question' => '2', 'conversation' => $r1['meta']['conversationId'], 'pending' => $r1['meta']['pendingId']];
+        // both requests start from the same (now stale) session snapshot
+        [$a] = $this->post($post, 'alice', $session);
+        $calls = count($this->chat->calls);
+        [$b, $after] = $this->post(array_merge($post, ['question' => '3']), 'alice', $session);
+        $this->assertSame(Outcome::ANSWER, $a['meta']['outcome']);
+        $this->assertSame(Outcome::NOTICE, $b['meta']['outcome']);
+        $this->assertCount($calls, $this->chat->calls);
+        $stored = array_values($after[SessionBridge::SESSION_KEY]['pending'] ?? [[]])[0] ?? [];
+        $this->assertArrayNotHasKey($r1['meta']['conversationId'], $stored, 'consumed token not resurrected');
+    }
+
+    public function testNegatedChoiceOverRealRequests()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        [$r1, $session] = $this->post(['question' => 'How do I change my password?']);
+        [$r2] = $this->post([
+            'question' => 'not VPN', 'conversation' => $r1['meta']['conversationId'], 'pending' => $r1['meta']['pendingId'],
+        ], 'alice', $session);
+        $this->assertSame(Outcome::CLARIFY, $r2['meta']['outcome']);
+        $this->assertNotContains('VPN', $r2['meta']['options']);
+        $this->assertCount(1, $this->chat->calls);
+    }
+
     public function provideOtherIdentity(): array
     {
         return ['other user' => ['bob'], 'logged out' => ['']];
@@ -129,6 +155,7 @@ class ActionTest extends \DokuWikiTest
     {
         $this->chat->queue(self::CLARIFY_REPLY);
         [$r1, $session] = $this->post(['question' => 'How do I change my password?']);
+        $this->assertNotEmpty($session[SessionBridge::SESSION_KEY]['pending'] ?? [], 'state really stored (no false pass)');
         $calls = count($this->chat->calls);
 
         [$r2, $after] = $this->post([

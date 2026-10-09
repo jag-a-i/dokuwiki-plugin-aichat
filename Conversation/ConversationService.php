@@ -85,6 +85,7 @@ class ConversationService
             'unknown_help' => 'I cannot tell which procedure applies without knowing the system or account. Please check with your helpdesk or a colleague who knows which system you use.',
             'max_rounds' => 'I still cannot tell which procedure applies. Please contact your helpdesk with the name of the system or account you are asking about.',
             'error' => 'Sorry, the AI chat service is currently unavailable. Please try again later. Reference: %s',
+            'reject_followup' => 'Which one do you mean instead? You can also name the system or account.',
             'expired' => 'That earlier question has expired or belongs to another chat. Please ask your question again.',
             'redacted' => 'It looks like your message contained a password or other secret. I removed it and did not use it. Never share credentials in the chat.',
         ], $lang);
@@ -115,6 +116,10 @@ class ConversationService
         try {
             $pending = $this->pending->get($conversation, $pendingId);
             if ($pending) {
+                // single use, atomically: a concurrent request that already used this token wins
+                if (!$this->pending->consume($conversation, $pendingId)) {
+                    return $this->result(Outcome::NOTICE, $question, $this->lang['expired'], [], $correlation, $redacted);
+                }
                 return $this->handleFollowup($question, $history, $conversation, $pending, $correlation, $redacted);
             }
             // any stale pending state for this conversation is dropped on a fresh question
@@ -156,30 +161,45 @@ class ConversationService
 
         switch ($res['type']) {
             case FollowupResolver::CANCEL:
-                $this->pending->clear($conversation);
                 return $this->result(Outcome::NOTICE, $reply, $this->lang['cancelled'], [], $correlation, $redacted);
 
             case FollowupResolver::UNKNOWN:
-                $this->pending->clear($conversation);
                 return $this->result(Outcome::NOTICE, $reply, $this->lang['unknown_help'], [], $correlation, $redacted);
 
             case FollowupResolver::NONE:
                 if ($rounds >= $this->conf['maxClarifyRounds']) {
-                    $this->pending->clear($conversation);
                     return $this->result(Outcome::NOTICE, $reply, $this->lang['max_rounds'], [], $correlation, $redacted);
                 }
-                $id = $this->pending->put($conversation, $need, [], $rounds + 1);
-                return $this->result(Outcome::CLARIFY, $reply, $this->lang['none_followup'], [], $correlation, $redacted, [], $id);
+                return $this->clarifyResult($reply, $conversation, $need, [], $this->lang['none_followup'], $rounds + 1, $correlation, $redacted);
+
+            case FollowupResolver::REJECT:
+                // "not VPN": never select a rejected option
+                $rejected = array_flip($res['rejected']);
+                $remaining = [];
+                foreach ($pending['options'] as $i => $opt) {
+                    if (!isset($rejected[$i])) $remaining[] = $opt;
+                }
+                if ($res['remainder'] !== '') {
+                    // "not VPN, my personal account": search again for what the user described,
+                    // without evidence that only supports the rejected options
+                    return $this->freetext(
+                        $need, $res['remainder'], $reply, $conversation, $correlation, $redacted, $rounds,
+                        $this->exclusivePages($pending['options'], $rejected)
+                    );
+                }
+                if ($rounds >= $this->conf['maxClarifyRounds']) {
+                    return $this->result(Outcome::NOTICE, $reply, $this->lang['max_rounds'], [], $correlation, $redacted);
+                }
+                $q = $remaining ? $this->lang['reject_followup'] : $this->lang['none_followup'];
+                return $this->clarifyResult($reply, $conversation, $need, $remaining, $q, $rounds + 1, $correlation, $redacted);
 
             case FollowupResolver::NEW_TOPIC:
-                $this->pending->clear($conversation);
                 return $this->answerOrClarify(
                     $reply, $reply, $history, $conversation, $correlation, $redacted,
                     $this->conf['clarify'] && !$this->isExplicitMulti($reply), 0, null
                 );
 
             case FollowupResolver::CHOICE:
-                $this->pending->clear($conversation);
                 $opt = $pending['options'][$res['index']];
                 $combined = $need . ' (' . $opt['label'] . ')';
                 return $this->answerOrClarify(
@@ -187,18 +207,53 @@ class ConversationService
                 );
 
             default: // FREETEXT: description, correction or a system outside the offered options
-                $this->pending->clear($conversation);
-                $combined = $need . ' (' . $reply . ')';
-                $allow = $rounds < $this->conf['maxClarifyRounds'];
-                $result = $this->answerOrClarify(
-                    $combined, $combined, [], $conversation, $correlation, $redacted, $allow, $rounds, null
-                );
-                if (!$allow && $result['outcome'] === Outcome::CLARIFY) {
-                    $this->pending->clear($conversation);
-                    return $this->result(Outcome::NOTICE, $reply, $this->lang['max_rounds'], [], $correlation, $redacted);
-                }
-                return $result;
+                return $this->freetext($need, $reply, $reply, $conversation, $correlation, $redacted, $rounds, []);
         }
+    }
+
+    /** search again for a free-text description; optionally without the given pages */
+    protected function freetext(
+        string $need, string $text, string $reply, string $conversation, string $correlation, bool $redacted,
+        int $rounds, array $excludePages
+    ): array {
+        $combined = $need . ' (' . $text . ')';
+        $allow = $rounds < $this->conf['maxClarifyRounds'];
+        $result = $this->answerOrClarify(
+            $combined, $combined, [], $conversation, $correlation, $redacted, $allow, $rounds, null, $excludePages
+        );
+        if (!$allow && $result['outcome'] === Outcome::CLARIFY) {
+            $this->pending->clear($conversation);
+            return $this->result(Outcome::NOTICE, $reply, $this->lang['max_rounds'], [], $correlation, $redacted);
+        }
+        return $result;
+    }
+
+    /** pages that support ONLY rejected options (pages shared with a remaining option are kept) */
+    protected function exclusivePages(array $options, array $rejected): array
+    {
+        $keep = [];
+        $drop = [];
+        foreach ($options as $i => $opt) {
+            foreach ($opt['pages'] as $p) {
+                if (isset($rejected[$i])) $drop[$p] = true; else $keep[$p] = true;
+            }
+        }
+        return array_keys(array_diff_key($drop, $keep));
+    }
+
+    /** store a pending clarification (compare-and-swap) and build the CLARIFY result */
+    protected function clarifyResult(
+        string $question, string $conversation, string $need, array $options, string $text, int $rounds,
+        string $correlation, bool $redacted
+    ): array {
+        $id = $this->pending->put($conversation, $need, $options, $rounds);
+        if ($id === '') {
+            // concurrent modification of this conversation: never show choices that are not stored
+            return $this->result(Outcome::NOTICE, $question, $this->lang['expired'], [], $correlation, $redacted);
+        }
+        return $this->result(
+            Outcome::CLARIFY, $question, $text, [], $correlation, $redacted, array_column($options, 'label'), $id
+        );
     }
 
     /**
@@ -207,10 +262,14 @@ class ConversationService
      */
     protected function answerOrClarify(
         string $question, string $search, array $history, string $conversation, string $correlation,
-        bool $redacted, bool $allowClarify, int $rounds, ?array $preferPages
+        bool $redacted, bool $allowClarify, int $rounds, ?array $preferPages, array $excludePages = []
     ): array {
         $span = $this->span('retrieval');
         $chunks = array_values(($this->retriever)($search));
+        if ($excludePages) {
+            $ex = array_flip($excludePages);
+            $chunks = array_values(array_filter($chunks, static fn(Chunk $c) => !isset($ex[$c->getPage()])));
+        }
         $this->end($span, ['chunks' => count($chunks)]);
 
         if ($preferPages !== null) {
@@ -271,15 +330,16 @@ class ConversationService
                 $options = $this->groundOptions($decision['options'], $refs);
                 if (count($options) >= 2) {
                     $q = $this->cleanQuestion($decision['question']) ?: $this->lang['clarify_default'];
-                    $id = $this->pending->put($conversation, $question, $options, $rounds + 1);
                     $this->end($span, ['result' => 'clarify', 'options' => count($options)]);
-                    return $this->result(Outcome::CLARIFY, $question, $q, [], $correlation, $redacted, array_column($options, 'label'), $id);
+                    return $this->clarifyResult($question, $conversation, $question, $options, $q, $rounds + 1, $correlation, $redacted);
                 }
                 if (!$decision['options'] && $this->cleanQuestion($decision['question'])) {
                     // no menu possible: generic targeted question, no invented choices
-                    $id = $this->pending->put($conversation, $question, [], $rounds + 1);
                     $this->end($span, ['result' => 'clarify_generic']);
-                    return $this->result(Outcome::CLARIFY, $question, $this->cleanQuestion($decision['question']), [], $correlation, $redacted, [], $id);
+                    return $this->clarifyResult(
+                        $question, $conversation, $question, [], $this->cleanQuestion($decision['question']),
+                        $rounds + 1, $correlation, $redacted
+                    );
                 }
             }
             // clarification not allowed or not grounded (e.g. one system only): force a direct answer

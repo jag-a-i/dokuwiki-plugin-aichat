@@ -7,8 +7,15 @@ namespace dokuwiki\plugin\aichat\Conversation;
  * and a per-tab conversation id. Browser-supplied ids are only lookup keys: the
  * stored data (original need, grounded options) never comes from the client.
  *
- * The storage array is injected by reference so tests can use a plain array;
- * production uses $_SESSION (see helper_plugin_aichat::getPendingStore()).
+ * Every write is a per-conversation compare-and-swap on the pending token id:
+ *  - consume(): delete only if the stored token is still the one presented (single use)
+ *  - put():     store a new token only if the slot still holds what this request saw
+ *  - clear():   delete only if the slot still holds what this request saw
+ * The persist callback performs the same check against the FRESH session data, so
+ * overlapping requests cannot double-use a token, delete a newer one or resurrect a consumed one.
+ *
+ * The local array is this request's snapshot (tests use a plain array; production
+ * uses SessionBridge, see helper_plugin_aichat::getPendingStore()).
  */
 class PendingStore
 {
@@ -21,7 +28,10 @@ class PendingStore
 
     /** @var array */
     protected $store;
-    /** @var callable|null persist(string $conversation, ?array $item): per-conversation write (null = delete) */
+    /**
+     * @var callable|null persist(string $conversation, ?array $item, ?string $expectedId): bool
+     *      applies the change only if the fresh stored token id equals $expectedId (null = empty slot)
+     */
     protected $persist;
     /** @var callable returns current unix time */
     protected $clock;
@@ -38,8 +48,15 @@ class PendingStore
         return (bool)preg_match('/^[A-Za-z0-9_-]{8,64}$/', $id);
     }
 
+    /** token id currently held in this request's snapshot (null if none) */
+    public function currentId(string $conversation): ?string
+    {
+        $item = $this->store[$conversation] ?? null;
+        return is_array($item) && isset($item['id']) ? (string)$item['id'] : null;
+    }
+
     /**
-     * @return array|null pending state if it exists, is fresh and matches the expected turn id
+     * @return array|null pending state if it exists, is fresh and matches the presented token id
      */
     public function get(string $conversation, string $pendingId): ?array
     {
@@ -55,9 +72,18 @@ class PendingStore
     }
 
     /**
+     * Atomically use up a token. Returns false if it was already consumed or replaced meanwhile.
+     */
+    public function consume(string $conversation, string $pendingId): bool
+    {
+        if ($this->currentId($conversation) !== $pendingId) return false;
+        return $this->write($conversation, null, $pendingId);
+    }
+
+    /**
      * @param string $need original (redacted) information need
      * @param array $options [['label'=>string,'pages'=>string[]], ...]
-     * @return string the new opaque pending id
+     * @return string the new opaque pending id, '' on a concurrent-modification conflict
      */
     public function put(string $conversation, string $need, array $options, int $rounds): string
     {
@@ -72,31 +98,33 @@ class PendingStore
             ];
         }
         $id = bin2hex(random_bytes(12));
-        unset($this->store[$conversation]); // re-insert at end for LRU ordering
-        $this->store[$conversation] = [
+        $item = [
             'id' => $id,
             'need' => mb_substr($need, 0, self::MAX_NEED_LEN),
             'options' => $clean,
             'rounds' => $rounds,
             'created' => ($this->clock)(),
         ];
-        while (count($this->store) > self::MAX_CONVERSATIONS) {
-            array_shift($this->store);
-        }
-        $this->save($conversation, $this->store[$conversation]);
-        return $id;
+        return $this->write($conversation, $item, $this->currentId($conversation)) ? $id : '';
     }
 
+    /** delete this conversation's token if it is still the one this request saw */
     public function clear(string $conversation): void
     {
-        if (isset($this->store[$conversation])) {
-            unset($this->store[$conversation]);
-            $this->save($conversation, null);
-        }
+        $current = $this->currentId($conversation);
+        if ($current !== null) $this->write($conversation, null, $current);
     }
 
-    protected function save(string $conversation, ?array $item): void
+    protected function write(string $conversation, ?array $item, ?string $expectedId): bool
     {
-        if ($this->persist) ($this->persist)($conversation, $item);
+        if ($this->persist) {
+            if (!($this->persist)($conversation, $item, $expectedId)) return false;
+        } elseif ($this->currentId($conversation) !== $expectedId) {
+            return false;
+        }
+        unset($this->store[$conversation]); // re-insert at end for LRU ordering
+        if ($item !== null) $this->store[$conversation] = $item;
+        while (count($this->store) > self::MAX_CONVERSATIONS) array_shift($this->store);
+        return true;
     }
 }

@@ -47,38 +47,37 @@ class SessionBridge
         return is_array($data) ? $data : [];
     }
 
+    /** @var bool whether the last successful write reached session storage (false = memory only) */
+    public bool $lastWritePersisted = false;
+
     /**
-     * Persist one conversation's pending state (null deletes it).
+     * Compare-and-swap one conversation's pending state (null deletes it).
      *
-     * Merges into the FRESH session data loaded under the session lock: only this conversation's
-     * entry is set or removed, so overlapping requests from other tabs (other conversations) are
-     * not lost. Entries of other identities are dropped. If the fresh session shows that the
-     * authenticated user changed (e.g. logout or login as someone else happened meanwhile),
-     * nothing is written, so stale state cannot be resurrected.
+     * Under the session lock the FRESH stored data is reloaded; the change is applied only if the
+     * stored token id for this conversation still equals $expectedId (null = slot must be empty).
+     * Only this conversation's entry changes, so overlapping requests for other conversations are
+     * kept, a consumed token cannot be resurrected and a newer token cannot be deleted by a stale
+     * request. Entries of other identities are dropped. If the session login changed since this
+     * request started (logout, re-login, user switch), nothing is written.
      *
-     * @return bool true if the change was persisted to session storage
+     * @return bool true if the change was applied
      */
-    public function writeConversation(string $conversation, ?array $item): bool
+    public function writeConversation(string $conversation, ?array $item, ?string $expectedId): bool
     {
+        $this->lastWritePersisted = false;
         $opened = false;
         if (session_status() !== PHP_SESSION_ACTIVE) {
-            if (session_id() === '' || !($this->canOpen)()) {
-                $this->apply($conversation, $item); // no session available: memory only
-                return false;
+            if (session_id() !== '' && ($this->canOpen)()) {
+                $opened = @session_start(); // reloads fresh stored data, replacing the stale snapshot
             }
-            $opened = @session_start(); // reloads fresh stored data, replacing the stale snapshot
-            if (!$opened) {
-                $this->apply($conversation, $item);
-                return false;
-            }
+            // otherwise: no session available (CLI, output sent) - memory only, same CAS rules
         }
-        if ($this->authChanged()) {
-            if ($opened) session_write_close();
-            return false;
+        $applied = !$this->authChanged() && $this->apply($conversation, $item, $expectedId);
+        if ($opened) {
+            session_write_close();
+            $this->lastWritePersisted = $applied;
         }
-        $this->apply($conversation, $item);
-        if ($opened) session_write_close();
-        return $opened;
+        return $applied;
     }
 
     /**
@@ -97,13 +96,15 @@ class SessionBridge
         return (string)($_SESSION[DOKU_COOKIE]['auth']['user'] ?? '');
     }
 
-    protected function apply(string $conversation, ?array $item): void
+    protected function apply(string $conversation, ?array $item, ?string $expectedId): bool
     {
         if (!isset($_SESSION) || !is_array($_SESSION)) $_SESSION = [];
         $own = $_SESSION[self::SESSION_KEY] ?? [];
         if (!is_array($own)) $own = [];
         $map = $own['pending'][$this->identity] ?? [];
         if (!is_array($map)) $map = [];
+        $current = isset($map[$conversation]['id']) ? (string)$map[$conversation]['id'] : null;
+        if ($current !== $expectedId) return false; // concurrent modification: refuse
         unset($map[$conversation]);
         if ($item !== null) $map[$conversation] = $item;
         // bound size: keep the newest entries
@@ -111,5 +112,6 @@ class SessionBridge
         while (count($map) > PendingStore::MAX_CONVERSATIONS) array_shift($map);
         $own['pending'] = $map ? [$this->identity => $map] : [];
         $_SESSION[self::SESSION_KEY] = $own;
+        return true;
     }
 }

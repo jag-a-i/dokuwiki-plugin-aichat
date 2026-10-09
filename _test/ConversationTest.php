@@ -249,6 +249,93 @@ class ConversationTest extends \DokuWikiTest
         $this->assertSame(['VPN', 'VPN token'], $r['options'], '"VPN account" merges into "VPN", "VPN token" stays');
     }
 
+    // review finding 4: negation / rejection must never select the rejected option
+    public function provideRejections(): array
+    {
+        return [['not VPN'], ['No, not the VPN one'], ['not 2'], ['no 2'], ['it is not VPN']];
+    }
+
+    /** @dataProvider provideRejections */
+    public function testRejectedOptionIsNeverSelected(string $reply)
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        $calls = count($this->chat->calls);
+        $r2 = $this->ask($reply, 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::CLARIFY, $r2['outcome'], 'targeted re-clarification');
+        $this->assertSame(['E-Mail', 'CRM'], $r2['options'], 'rejected option removed');
+        $this->assertSame([], $r2['sources']);
+        $this->assertCount($calls, $this->chat->calls, 'no model call, nothing answered');
+        $this->assertStringNotContainsString('vpnctl', json_encode($r2));
+        // the remaining options are resolved against the NEW pending list
+        $this->chat->queue("DECISION: ANSWER\nUSED: S1\nANSWER:\nAvatar, Profile.");
+        $r3 = $this->ask('2', 'tabAAAAAAAA', $r2['pendingId']);
+        $this->assertStringContainsString('(CRM)', $this->chat->lastPrompt());
+        $this->assertSame(['it:crm:password'], array_map(fn($c) => $c->getPage(), $r3['sources']));
+    }
+
+    public function testRejectionWithCorrectionSearchesWithoutRejectedEvidence()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: NO_INFORMATION");
+        $r = $this->ask('How do I change my password?');
+        $r2 = $this->ask('not VPN, my personal account', 'tabAAAAAAAA', $r['pendingId']);
+        $prompt = $this->chat->lastPrompt();
+        $this->assertStringContainsString('Q:How do I change my password? (my personal account)', $prompt);
+        $this->assertStringNotContainsString('vpnctl', $prompt, 'evidence only supporting VPN excluded');
+        $this->assertStringNotContainsString('(VPN)', $prompt);
+        $this->assertSame(Outcome::NO_INFORMATION_TEXT, $r2['answer']);
+    }
+
+    public function testAllOptionsRejectedAsksGenerically()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        $r2 = $this->ask('not e-mail, vpn or crm', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::CLARIFY, $r2['outcome']);
+        $this->assertSame([], $r2['options']);
+        $this->assertCount(1, $this->chat->calls);
+    }
+
+    public function testPositiveChoiceNextToRejectionIsSelected()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nAvatar.");
+        $r = $this->ask('How do I change my password?');
+        $this->ask('the CRM one, not VPN', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertStringContainsString('(CRM)', $this->chat->lastPrompt());
+    }
+
+    // review finding 5 (service level): a token presented by two overlapping requests is used once
+    public function testConcurrentRequestsCannotDoubleUseAToken()
+    {
+        $fresh = []; // stands in for the fresh, locked session data
+        $persist = function (string $conv, ?array $item, ?string $expected) use (&$fresh): bool {
+            $cur = $fresh[$conv]['id'] ?? null;
+            if ($cur !== $expected) return false;
+            unset($fresh[$conv]);
+            if ($item !== null) $fresh[$conv] = $item;
+            return true;
+        };
+        $svc = function (array $snapshot) use ($persist) {
+            $snap = $snapshot;
+            return new ConversationService(
+                $this->wiki->retriever(), $this->chat,
+                static fn(array $v) => "CLARIFY:{$v['clarify']}\nQ:{$v['question']}\n{$v['context']}",
+                new PendingStore($snap, $persist, fn() => $this->now),
+                [], [], null, null, null, null, $this->wiki->pageFetcher()
+            );
+        };
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse vpnctl.");
+        $r = $svc($fresh)->handle('How do I change my password?', [], 'tabAAAAAAAA');
+        $snap1 = $fresh; $snap2 = $fresh;            // two requests start with the same snapshot
+        $a = $svc($snap1)->handle('2', [], 'tabAAAAAAAA', $r['pendingId']);
+        $calls = count($this->chat->calls);
+        $b = $svc($snap2)->handle('3', [], 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::ANSWER, $a['outcome']);
+        $this->assertSame(Outcome::NOTICE, $b['outcome'], 'second use refused');
+        $this->assertCount($calls, $this->chat->calls, 'no model call for the refused request');
+        $this->assertSame([], $fresh, 'consumed token not resurrected');
+    }
+
     // 8. tabs, users, forged ids, expiry, invalid conversation ids cannot bypass or hijack clarification
     public function provideForeignState(): array
     {

@@ -337,7 +337,8 @@ class helper_plugin_aichat extends Plugin
         $this->pendingData = $bridge->read();
         return new PendingStore(
             $this->pendingData,
-            static fn(string $conversation, ?array $item) => $bridge->writeConversation($conversation, $item)
+            static fn(string $conversation, ?array $item, ?string $expectedId) =>
+                $bridge->writeConversation($conversation, $item, $expectedId)
         );
     }
 

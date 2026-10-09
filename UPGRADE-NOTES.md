@@ -48,12 +48,26 @@ the installed production revision and settings are unknown. Tested only in a san
   (e.g. "Webmail" vs "E-Mail") are not detected in code and rely on the prompt instructions.
 
 ## Session state concurrency
-- Writes are per conversation: the session is reopened, only that conversation's entry is set or
-  removed in the fresh locked data, and the session is closed again. Overlapping requests from other
-  tabs do not lose each other's state. Entries of other identities are dropped on write.
+- Every pending-state write is a per-conversation compare-and-swap on the token id, applied to the
+  fresh session data loaded under the session lock: consume (single use), put (only if the slot
+  still holds what this request saw) and clear. Overlapping requests for other conversations are
+  kept; a token presented by two requests is used once (the second gets NOTICE without a model
+  call); a stale request can neither resurrect a consumed token nor delete a newer one.
 - If the session login changed while a request was running (logout, re-login, user switch), the
-  late write is refused, so stale state cannot be resurrected. Setups that do not keep the login in
-  the session (SSO, HTTP auth) are unaffected because fresh and start-of-request values are compared.
+  late write is refused. Setups that do not keep the login in the session (SSO, HTTP auth) are
+  unaffected because fresh and start-of-request values are compared.
+- The session is reopened only for the write itself and closed immediately; it is never held
+  across model or vector store calls.
+
+## Follow-up replies with negation
+- "not VPN", "not 2", "no 2", "neither E-Mail nor CRM", "not E-Mail, VPN or CRM" reject options;
+  a rejected option is never selected. Without further text the remaining options are offered
+  again (or a generic question if none remain). With a correction ("not VPN, my personal
+  account") the described text is searched again, excluding pages that only support rejected
+  options. "the CRM one, not VPN" selects CRM. "No. 2" (with a dot) means number 2.
+- Detection is English/German keyword based (not, no, isn't, without, except, instead of,
+  rather than, neither/nor, nicht, kein). Other phrasings of rejection may be read as free text,
+  which is searched again rather than guessed.
 
 ## Browser end-to-end test
 - `_test/e2e/run_e2e.sh <dokuwiki-src> <sqlite-plugin>` builds a throw-away synthetic site and drives
