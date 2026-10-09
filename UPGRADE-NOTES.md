@@ -37,6 +37,16 @@ the installed production revision and settings are unknown. Tested only in a san
   IP and username when enabled - a known privacy issue, see the separate migration proposal).
   It now logs the redacted question and nothing for ERROR outcomes.
 
+## Clarification choices and option grounding
+- A chosen option is answered only from that option's own pages, fetched again with the current
+  read ACL (`Embeddings::getPageChunks`), independent of search ranking. If none of them is still
+  readable or present, the answer is the exact no-information text without a model call; other
+  procedures are never used as a fallback.
+- Options are merged only when their normalized names match (case, punctuation and generic words
+  such as "account", "password", "login" ignored). Options citing the same page stay separate,
+  because one page may document several systems. Different aliases for the same system
+  (e.g. "Webmail" vs "E-Mail") are not detected in code and rely on the prompt instructions.
+
 ## Session state concurrency
 - Writes are per conversation: the session is reopened, only that conversation's entry is set or
   removed in the fresh locked data, and the session is closed again. Overlapping requests from other

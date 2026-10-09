@@ -42,7 +42,9 @@ class ConversationTest extends \DokuWikiTest
             $this->wiki->retriever(),
             $this->chat,
             static fn(array $v) => "CLARIFY:{$v['clarify']}\nQ:{$v['question']}\n{$v['context']}",
-            $store
+            $store,
+            [], [], null, null, null, null,
+            $this->wiki->pageFetcher()
         );
     }
 
@@ -149,7 +151,9 @@ class ConversationTest extends \DokuWikiTest
     public function testSameSystemNoFakeAlternatives()
     {
         $this->chat->queue(
-            "DECISION: CLARIFY\nQUESTION: Which?\nOPTION: E-Mail | S1, S4\nOPTION: Webmail | S4, S1",
+            // same system named twice ("E-mail account" normalizes to "e-mail"); a different alias such as
+            // "Webmail" is NOT detectable in code and relies on the prompt (documented limitation)
+            "DECISION: CLARIFY\nQUESTION: Which?\nOPTION: E-Mail | S1, S4\nOPTION: E-mail account | S4",
             "DECISION: ANSWER\nUSED: S1\nANSWER:\nOpen webmail settings."
         );
         $r = $this->ask('How do I change my email password?');
@@ -166,10 +170,83 @@ class ConversationTest extends \DokuWikiTest
         $this->assertStringNotContainsString('HIDDEN-HR-MARKER', $this->chat->lastPrompt());
 
         $this->wiki->deny['it:vpn:password'] = ['alice']; // revoked between turns
-        $this->chat->queue("DECISION: NO_INFORMATION");
+        $calls = count($this->chat->calls);
         $r2 = $this->ask('2', 'tabAAAAAAAA', $r['pendingId']);
-        $this->assertStringNotContainsString('vpnctl', $this->chat->lastPrompt());
+        $this->assertCount($calls, $this->chat->calls, 'no model call: other procedures are never used instead');
+        $this->assertSame(Outcome::NO_INFORMATION, $r2['outcome']);
         $this->assertSame(Outcome::NO_INFORMATION_TEXT, $r2['answer']);
+        $this->assertSame([], $r2['sources']);
+    }
+
+    // review finding 1: chosen evidence revoked while other procedures remain -> never broaden
+    public function testChosenSourceRevokedOtherProceduresRemain()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        $this->wiki->deny['it:vpn:password'] = ['alice'];
+        $calls = count($this->chat->calls);
+        $r2 = $this->ask('VPN', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::NO_INFORMATION_TEXT, $r2['answer']);
+        $this->assertSame([], $r2['sources']);
+        $this->assertCount($calls, $this->chat->calls);
+        $this->assertStringNotContainsString('vpnctl', json_encode($r2));
+    }
+
+    public function testChosenPageDeletedOtherProceduresRemain()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        unset($this->wiki->pages['it:vpn:password']);
+        $calls = count($this->chat->calls);
+        $r2 = $this->ask('2', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::NO_INFORMATION_TEXT, $r2['answer']);
+        $this->assertCount($calls, $this->chat->calls);
+    }
+
+    public function testChosenPageStillReadableButNotRankedIsFetchedDirectly()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse vpnctl.");
+        $r = $this->ask('How do I change my password?');
+        // fresh retrieval no longer ranks the VPN page (e.g. top-k cutoff), but it still exists and is readable
+        $all = $this->wiki->retriever();
+        $s = new ConversationService(
+            static fn($q) => array_values(array_filter($all($q), fn($c) => $c->getPage() !== 'it:vpn:password')),
+            $this->chat, static fn(array $v) => "CLARIFY:{$v['clarify']}\nQ:{$v['question']}\n{$v['context']}",
+            new PendingStore($this->session, null, fn() => $this->now),
+            [], [], null, null, null, null, $this->wiki->pageFetcher()
+        );
+        $r2 = $s->handle('2', [], 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::ANSWER, $r2['outcome']);
+        $this->assertSame(['it:vpn:password'], array_map(fn($c) => $c->getPage(), $r2['sources']));
+        $prompt = $this->chat->lastPrompt();
+        $this->assertStringContainsString('vpnctl', $prompt);
+        $this->assertStringNotContainsString('webmail settings', $prompt);
+        $this->assertStringNotContainsString('avatar', $prompt);
+    }
+
+    // review finding 2: one page documenting several systems keeps distinct choices
+    public function testDistinctSystemsOnOnePageArePreserved()
+    {
+        $this->wiki->pages = ['it:passwords:overview' =>
+            'Password changes. E-Mail: open webmail settings. VPN: run vpnctl passwd. CRM: avatar, Profile.'];
+        $this->chat->queue(
+            "DECISION: CLARIFY\nQUESTION: Which account?\nOPTION: E-Mail | S1\nOPTION: VPN | S1\nOPTION: CRM | S1",
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nRun vpnctl passwd."
+        );
+        $r = $this->ask('How do I change my password?');
+        $this->assertSame(Outcome::CLARIFY, $r['outcome']);
+        $this->assertSame(['E-Mail', 'VPN', 'CRM'], $r['options']);
+        $r2 = $this->ask('2', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertSame(Outcome::ANSWER, $r2['outcome']);
+        $this->assertStringContainsString('Q:How do I change my password? (VPN)', $this->chat->lastPrompt());
+        $this->assertStringContainsString('CLARIFY:not allowed', $this->chat->lastPrompt());
+    }
+
+    public function testSimilarButDistinctNamesAreNotMerged()
+    {
+        $this->chat->queue("DECISION: CLARIFY\nQUESTION: Which?\nOPTION: VPN | S2\nOPTION: VPN token | S2\nOPTION: VPN account | S2");
+        $r = $this->ask('How do I change my password?');
+        $this->assertSame(['VPN', 'VPN token'], $r['options'], '"VPN account" merges into "VPN", "VPN token" stays');
     }
 
     // 8. tabs, users, forged ids, expiry, invalid conversation ids cannot bypass or hijack clarification

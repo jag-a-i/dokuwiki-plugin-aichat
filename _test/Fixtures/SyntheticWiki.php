@@ -37,4 +37,17 @@ class SyntheticWiki
             return $out;
         };
     }
+
+    /** chunks of one page, only if the current user may read it (like Embeddings::getPageChunks) */
+    public function pageFetcher(): callable
+    {
+        return function (string $page): array {
+            $this->fetched[] = $page;
+            if (!isset($this->pages[$page])) return [];
+            if (in_array($this->user, $this->deny[$page] ?? [], true)) return [];
+            return [new Chunk($page, crc32($page), $this->pages[$page], [], 'en', 1, 0.5)];
+        };
+    }
+
+    public array $fetched = [];
 }

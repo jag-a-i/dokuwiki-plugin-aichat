@@ -318,7 +318,9 @@ class helper_plugin_aichat extends Plugin
             $rephraser,
             static fn($page) => p_get_first_heading($page) ?: $page,
             new AnswerFormatter([self::class, 'wikiPageFromUrl']),
-            $o['trace'] ?? null
+            $o['trace'] ?? null,
+            // chunks of a chosen page; getPageChunks() applies the current user's read ACL
+            $o['pageFetcher'] ?? (isset($o['retriever']) ? null : fn($page) => $this->getEmbeddings()->getPageChunks($page))
         );
         return $service->handle((string)$question, $history, (string)$conversation, (string)$pendingId);
     }

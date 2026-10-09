@@ -41,6 +41,8 @@ class ConversationService
     protected $lang;
     /** @var TraceRecorder|null */
     protected $trace;
+    /** @var callable|null (string $page): Chunk[]  chunks of one page, ONLY if the current user may read it */
+    protected $pageFetcher;
     /** conversation id used for the current turn (may be freshly generated) */
     protected string $conversation = '';
 
@@ -54,8 +56,10 @@ class ConversationService
         ?callable $rephraser = null,
         ?callable $titleFn = null,
         ?AnswerFormatter $formatter = null,
-        $trace = null
+        $trace = null,
+        ?callable $pageFetcher = null
     ) {
+        $this->pageFetcher = $pageFetcher;
         $this->retriever = $retriever;
         $this->chat = $chat;
         $this->promptBuilder = $promptBuilder;
@@ -210,10 +214,25 @@ class ConversationService
         $this->end($span, ['chunks' => count($chunks)]);
 
         if ($preferPages !== null) {
+            // A clarification choice is answered ONLY from the chosen option's pages, re-checked now.
+            // Never broaden to other procedures if that evidence disappeared or became unreadable.
             $prefer = array_flip($preferPages);
-            $selected = array_values(array_filter($chunks, static fn(Chunk $c) => isset($prefer[$c->getPage()])));
-            // if the selected option's pages are gone or no longer readable, fall back to the fresh results
-            if ($selected) $chunks = $selected;
+            $selected = [];
+            foreach ($chunks as $c) {
+                if (isset($prefer[$c->getPage()])) $selected[] = $c;
+            }
+            if ($this->pageFetcher) {
+                $seen = [];
+                foreach ($selected as $c) $seen[$c->getPage() . '#' . $c->getId()] = true;
+                foreach ($preferPages as $page) {
+                    foreach (($this->pageFetcher)($page) as $c) { // fetcher applies the current ACL
+                        if ($c->getPage() !== $page) continue;
+                        $k = $c->getPage() . '#' . $c->getId();
+                        if (!isset($seen[$k])) { $selected[] = $c; $seen[$k] = true; }
+                    }
+                }
+            }
+            $chunks = $selected;
         }
 
         if (!$chunks) {
@@ -328,22 +347,33 @@ class ConversationService
                 if (isset($refs[$r])) $pages[$refs[$r]->getPage()] = true;
             }
             if (!$pages) continue; // not backed by permitted evidence
-            $key = mb_strtolower(preg_replace('/[^\p{L}\p{N}]+/u', '', $label));
+            $key = $this->optionKey($label);
             if (isset($byLabel[$key])) {
                 $byLabel[$key]['pages'] += $pages;
             } else {
                 $byLabel[$key] = ['label' => $label, 'pages' => $pages];
             }
         }
-        // options backed by exactly the same pages describe the same thing: merge
-        $bySet = [];
+        // NOTE: options are NOT merged because they share source pages - one page may document
+        // several distinct systems. Only options with the same normalized name are merged.
+        $out = [];
         foreach ($byLabel as $opt) {
-            $set = array_keys($opt['pages']);
-            sort($set);
-            $k = implode('|', $set);
-            if (!isset($bySet[$k])) $bySet[$k] = ['label' => $opt['label'], 'pages' => $set];
+            $out[] = ['label' => $opt['label'], 'pages' => array_keys($opt['pages'])];
         }
-        return array_slice(array_values($bySet), 0, PendingStore::MAX_OPTIONS);
+        return array_slice($out, 0, PendingStore::MAX_OPTIONS);
+    }
+
+    /**
+     * Normalized identity of an option name: case, punctuation and generic words
+     * ("account", "password", "login", ...) are ignored, so "E-Mail account" == "e-mail".
+     * Different names for the same system ("Webmail" vs "E-Mail") are NOT detected.
+     */
+    protected function optionKey(string $label): string
+    {
+        $l = mb_strtolower($label);
+        $l = preg_replace('/\b(the|my|your|an?|accounts?|passwords?|passwort|logins?|systems?|credentials?)\b/u', ' ', $l);
+        $key = preg_replace('/[^\p{L}\p{N}]+/u', '', $l);
+        return $key !== '' ? $key : mb_strtolower(preg_replace('/[^\p{L}\p{N}]+/u', '', $label));
     }
 
     protected function cleanLabel(string $label): string
