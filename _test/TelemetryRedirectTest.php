@@ -15,6 +15,7 @@ namespace dokuwiki\plugin\aichat\test;
 class TelemetryRedirectTest extends \DokuWikiTest
 {
     protected array $procs = [];
+    protected string $lastRaw = '';
     protected string $dir;
 
     public function setUp(): void
@@ -63,14 +64,17 @@ class TelemetryRedirectTest extends \DokuWikiTest
         return array_map(fn($l) => json_decode($l, true), array_filter(explode("\n", (string)file_get_contents($log))));
     }
 
-    protected function export(string $backend, string $url, array $phpArgs = []): array
+    protected function export(string $backend, string $url, array $phpArgs = [], string $debug = ''): array
     {
-        $cmd = array_merge([PHP_BINARY], $phpArgs, [__DIR__ . '/Fixtures/redirect_client.php', $backend, $url]);
+        $cmd = array_merge([PHP_BINARY], $phpArgs, [__DIR__ . '/Fixtures/redirect_client.php', $backend, $url],
+            $debug !== '' ? [$debug] : []);
         $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
         $out = stream_get_contents($pipes[1]);
         $err = stream_get_contents($pipes[2]);
         proc_close($proc);
-        $r = json_decode((string)$out, true);
+        $this->lastRaw = $out . $err;
+        $lines = array_filter(explode("\n", trim($out)));
+        $r = json_decode((string)end($lines), true);
         $this->assertIsArray($r, "client output: $out $err");
         return $r;
     }
@@ -140,6 +144,33 @@ class TelemetryRedirectTest extends \DokuWikiTest
         $http = \dokuwiki\plugin\aichat\Telemetry\ExporterFactory::dokuHttp();
         foreach (['file:///etc/passwd', 'ftp://127.0.0.1/x', 'gopher://127.0.0.1/'] as $url) {
             $this->assertSame(0, $http($url, [], '{}', 1), $url);
+        }
+    }
+
+    public function provideDebugTriggers(): array
+    {
+        return ['?httpdebug=1' => ['request'], 'Referer contains httpdebug' => ['referer']];
+    }
+
+    /**
+     * DokuWiki debug mode (allowdebug=1) must never dump telemetry credentials or payloads.
+     * @dataProvider provideDebugTriggers
+     */
+    public function testDebugModeNeverPrintsCredentialsOrPayload(string $trigger)
+    {
+        foreach (['langfuse', 'otlp'] as $backend) {
+            [$eport, $elog] = $this->server(200);
+            $url = $backend === 'langfuse' ? "http://127.0.0.1:$eport" : "http://127.0.0.1:$eport/v1/traces";
+            $r = $this->export($backend, $url, [], $trigger);
+            $this->assertTrue($r['debugActiveForDokuClient'], 'the trigger really enables DokuHTTPClient debug (test is meaningful)');
+            $this->assertTrue($r['allowdebugAtExport'], 'allowdebug still on when the exporter runs');
+            $this->assertTrue($r['ok'], 'delivery still works');
+            $this->assertSame('', $r['captured'], 'transport produced no output at all');
+            foreach (['Authorization', 'sk-lf-REDIRECT-CANARY', base64_encode('pk-lf-placeholder:sk-lf-REDIRECT-CANARY'),
+                         'OTLP-REDIRECT-CANARY', 'BODY-CANARY-0123', 'resourceSpans'] as $secret) {
+                $this->assertStringNotContainsString($secret, $this->lastRaw, "$backend/$trigger leaked $secret");
+            }
+            $this->assertStringContainsString('BODY-CANARY-0123', $this->requests($elog)[0]['body'], 'payload did reach the endpoint');
         }
     }
 }

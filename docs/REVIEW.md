@@ -12,6 +12,15 @@ Now `max_redirect = 0`, non-http(s) URLs refused, 3xx fails closed without retry
 two-server test (redirect receiver gets no request) for all five codes on both backends plus an
 https->http downgrade; 12 of 13 cases fail on the previous code.
 
+Independent review (conditional P1, FIXED): with `allowdebug` enabled, `?httpdebug` or a Referer
+containing `httpdebug` switched DokuHTTPClient into debug mode, which echoes the full request
+(Authorization header, Basic secret, trace body) into the AJAX output. Verified on the previous code:
+2881 bytes of output containing the header, the base64 secret and the body. Now the base HTTPClient is
+used with `debug = false` (also no HTTPCLIENT_REQUEST_SEND exposure to other plugins). Regression for
+both triggers on both backends; fails on the previous code. While writing it, a test-client bug
+(overwriting DokuWiki's global $conf) initially made the regression pass on vulnerable code; caught by
+checking against the old code, fixed, and the test now asserts allowdebug is active at export time.
+
 Findings of this pass:
 - FIXED: remote `similar` sent the query unredacted to the embedding endpoint (`ask` already redacted).
 - FIXED (packaging): upstream `.gitattributes` export-ignores `_test/`; earlier checkpoint zips made with

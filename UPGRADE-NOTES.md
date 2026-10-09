@@ -131,6 +131,11 @@ the installed production revision and settings are unknown. Tested only in a san
   Authorization header and, for 307/308, the trace body to whatever host a redirect names
   (including http:// downgrades). Any 3xx is a non-retryable failure; only http(s) endpoint URLs are
   accepted. Configure the final endpoint URL directly (no redirecting proxies or http->https redirects).
+- Debug output is always off for telemetry requests: with `allowdebug` on, DokuWiki's HTTP client
+  would dump requests (incl. the Authorization header and trace body) when `?httpdebug` or a
+  Referer containing `httpdebug` is present. The exporter uses the base HTTPClient with
+  `debug = false` and DokuWiki's proxy settings; it does not trigger HTTPCLIENT_REQUEST_SEND, so
+  other plugins never see the credential headers.
 - Other backends: `ExporterFactory::register('name', fn($conf, $http, $spool) => new MyExporter())`
   with an `ExporterInterface` implementation; no chat code changes needed. `otlp` targets any
   OpenTelemetry collector.
