@@ -1,0 +1,326 @@
+<?php
+
+namespace dokuwiki\plugin\aichat\test;
+
+use dokuwiki\plugin\aichat\Conversation\ConversationService;
+use dokuwiki\plugin\aichat\Conversation\Outcome;
+use dokuwiki\plugin\aichat\Conversation\PendingStore;
+use dokuwiki\plugin\aichat\Model\ModelException;
+use dokuwiki\plugin\aichat\test\Fixtures\FakeChatModel;
+use dokuwiki\plugin\aichat\test\Fixtures\SyntheticWiki;
+
+require_once __DIR__ . '/Fixtures/FakeChatModel.php';
+require_once __DIR__ . '/Fixtures/SyntheticWiki.php';
+
+/**
+ * Deterministic mocked tests for grounded clarification (Feature A/B).
+ * These do NOT prove that a real model follows the decision policy.
+ *
+ * @group plugin_aichat
+ * @group plugins
+ */
+class ConversationTest extends \DokuWikiTest
+{
+    protected SyntheticWiki $wiki;
+    protected FakeChatModel $chat;
+    protected array $session = [];
+    protected int $now = 1000000;
+
+    public function setUp(): void
+    {
+        parent::setUp();
+        $this->wiki = new SyntheticWiki();
+        $this->chat = new FakeChatModel();
+        $this->session = [];
+    }
+
+    protected function service(?array &$session = null): ConversationService
+    {
+        if ($session === null) $session = &$this->session;
+        $store = new PendingStore($session, null, fn() => $this->now);
+        return new ConversationService(
+            $this->wiki->retriever(),
+            $this->chat,
+            static fn(array $v) => "CLARIFY:{$v['clarify']}\nQ:{$v['question']}\n{$v['context']}",
+            $store
+        );
+    }
+
+    protected const CLARIFY_REPLY = "DECISION: CLARIFY\nQUESTION: Which account do you want to change the password for?\n" .
+        "OPTION: E-Mail | S1, S4\nOPTION: VPN | S2\nOPTION: CRM | S3\nOPTION: E-mail | S4";
+
+    protected function ask(string $q, string $conv = 'tabAAAAAAAA', string $pending = ''): array
+    {
+        return $this->service()->handle($q, [], $conv, $pending);
+    }
+
+    // 1. ambiguous -> one clarification, no procedure dump, waits
+    public function testAmbiguousQuestionClarifies()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $r = $this->ask('How do I change my password?');
+        $this->assertSame(Outcome::CLARIFY, $r['outcome']);
+        $this->assertSame(['E-Mail', 'VPN', 'CRM'], $r['options']); // duplicate E-mail merged
+        $this->assertSame([], $r['sources']);
+        $this->assertStringNotContainsString(Outcome::FOOTER_TEXT, $r['answer']);
+        $this->assertStringNotContainsString('webmail settings', $r['answer']);
+        $this->assertNotSame('', $r['pendingId']);
+        $this->assertCount(1, $this->chat->calls);
+        $this->assertStringContainsString('CLARIFY:allowed', $this->chat->lastPrompt());
+    }
+
+    // 2. specific question -> direct scoped answer
+    public function testSpecificQuestionAnswersDirectly()
+    {
+        $this->chat->queue("DECISION: ANSWER\nUSED: S1\nANSWER:\nRun `vpnctl passwd` on the portal.");
+        $r = $this->ask('How do I change my VPN password?');
+        $this->assertSame(Outcome::ANSWER, $r['outcome']);
+        $this->assertSame(['it:vpn:password'], array_map(fn($c) => $c->getPage(), $r['sources']));
+        $this->assertSame(1, substr_count($r['answer'], Outcome::FOOTER_TEXT));
+        $this->assertStringEndsWith("\n\n" . Outcome::FOOTER_TEXT, $r['answer']);
+    }
+
+    // 3. numeric and natural-language choices resolve against the pending options
+    public function provideChoices(): array
+    {
+        return [['2'], ['#2'], ['option 2'], ['the second one'], ['VPN'], ['the vpn one please']];
+    }
+
+    /** @dataProvider provideChoices */
+    public function testChoiceResolves(string $reply)
+    {
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse vpnctl.");
+        $first = $this->ask('How do I change my password?');
+        $r = $this->ask($reply, 'tabAAAAAAAA', $first['pendingId']);
+        $this->assertSame(Outcome::ANSWER, $r['outcome']);
+        $this->assertStringContainsString('(VPN)', $this->chat->lastPrompt());
+        $this->assertStringContainsString('CLARIFY:not allowed', $this->chat->lastPrompt());
+        $this->assertStringNotContainsString('webmail settings', $this->chat->lastPrompt()); // only selected evidence
+        $this->assertSame(['it:vpn:password'], array_map(fn($c) => $c->getPage(), $r['sources']));
+        $this->assertSame([], $this->session, 'pending state cleared after resolution');
+    }
+
+    // 4. I don't know / none / cancel / topic change / correction
+    public function testUnknownNoneCancelTopicChange()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $p = $this->ask('How do I change my password?')['pendingId'];
+        $r = $this->ask("I don't know", 'tabAAAAAAAA', $p);
+        $this->assertSame(Outcome::NOTICE, $r['outcome']);
+        $this->assertCount(1, $this->chat->calls, 'no guessing model call');
+
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $p = $this->ask('How do I change my password?')['pendingId'];
+        $r = $this->ask('none of these', 'tabAAAAAAAA', $p);
+        $this->assertSame(Outcome::CLARIFY, $r['outcome']);
+        $this->assertSame([], $r['options']);
+        $this->assertNotSame('', $r['pendingId']);
+
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $p = $this->ask('How do I change my password?')['pendingId'];
+        $r = $this->ask('cancel', 'tabAAAAAAAA', $p);
+        $this->assertSame(Outcome::NOTICE, $r['outcome']);
+        $this->assertSame([], $this->session);
+
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nEvery Friday.");
+        $p = $this->ask('How do I change my password?')['pendingId'];
+        $r = $this->ask('When is the coffee machine descaled?', 'tabAAAAAAAA', $p);
+        $this->assertSame(Outcome::ANSWER, $r['outcome']);
+        $this->assertStringContainsString('Q:When is the coffee machine descaled?', $this->chat->lastPrompt());
+
+        // correction / system outside the offered list -> searched as free text
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: NO_INFORMATION");
+        $p = $this->ask('How do I change my password?')['pendingId'];
+        $r = $this->ask('actually I meant my Zoom account', 'tabAAAAAAAA', $p);
+        $this->assertStringContainsString('(actually I meant my Zoom account)', $this->chat->lastPrompt());
+        $this->assertSame(Outcome::NO_INFORMATION_TEXT, $r['answer']);
+    }
+
+    // 5. explicit comparison is not narrowed
+    public function testComparisonNotNarrowed()
+    {
+        $this->chat->queue("DECISION: ANSWER\nUSED: S1, S2\nANSWER:\nE-Mail uses webmail; VPN uses vpnctl.");
+        $r = $this->ask('Compare the VPN and E-Mail password change procedures');
+        $this->assertStringContainsString('CLARIFY:not allowed', $this->chat->lastPrompt());
+        $this->assertCount(2, $r['sources']);
+    }
+
+    // 6. several articles about one system do not create fake alternatives
+    public function testSameSystemNoFakeAlternatives()
+    {
+        $this->chat->queue(
+            "DECISION: CLARIFY\nQUESTION: Which?\nOPTION: E-Mail | S1, S4\nOPTION: Webmail | S4, S1",
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nOpen webmail settings."
+        );
+        $r = $this->ask('How do I change my email password?');
+        $this->assertSame(Outcome::ANSWER, $r['outcome']);
+        $this->assertCount(2, $this->chat->calls);
+    }
+
+    // 7. ACL-denied alternatives never appear; revoked access respected on the next turn
+    public function testAclDeniedAndRevoked()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY . "\nOPTION: HR portal | S9");
+        $r = $this->ask('How do I change my password?');
+        $this->assertNotContains('HR portal', $r['options']);
+        $this->assertStringNotContainsString('HIDDEN-HR-MARKER', $this->chat->lastPrompt());
+
+        $this->wiki->deny['it:vpn:password'] = ['alice']; // revoked between turns
+        $this->chat->queue("DECISION: NO_INFORMATION");
+        $r2 = $this->ask('2', 'tabAAAAAAAA', $r['pendingId']);
+        $this->assertStringNotContainsString('vpnctl', $this->chat->lastPrompt());
+        $this->assertSame(Outcome::NO_INFORMATION_TEXT, $r2['answer']);
+    }
+
+    // 8. tabs, users, forged ids, expiry, invalid conversation ids cannot bypass or hijack clarification
+    public function provideForeignState(): array
+    {
+        return [
+            'other tab' => ['tab'],
+            'other user/session' => ['user'],
+            'forged pending id' => ['forged'],
+            'expired' => ['expired'],
+        ];
+    }
+
+    /** @dataProvider provideForeignState */
+    public function testNumericChoiceWithForeignStateIsNeverResolved(string $case)
+    {
+        $this->chat->queue(self::CLARIFY_REPLY);
+        $p = $this->ask('How do I change my password?')['pendingId'];
+        $callsBefore = count($this->chat->calls);
+
+        foreach (['2', 'the second one'] as $reply) {
+            if ($case === 'tab') {
+                $r = $this->ask($reply, 'tabBBBBBBBB', $p);
+            } elseif ($case === 'user') {
+                $other = [];
+                $r = $this->service($other)->handle($reply, [], 'tabAAAAAAAA', $p);
+                $this->assertSame([], $other, 'nothing stored for the other user');
+            } elseif ($case === 'forged') {
+                $r = $this->ask($reply, 'tabAAAAAAAA', 'forged' . $p);
+            } else {
+                $this->now += PendingStore::TTL + 1;
+                $r = $this->ask($reply, 'tabAAAAAAAA', $p);
+            }
+            $this->assertSame(Outcome::NOTICE, $r['outcome'], "$case / $reply");
+            $this->assertSame([], $r['sources']);
+            $this->assertStringNotContainsString('vpnctl', $r['answer']);
+        }
+        $this->assertCount($callsBefore, $this->chat->calls, 'no model call, nothing guessed');
+        if ($case === 'tab' || $case === 'user') {
+            $this->assertArrayHasKey('tabAAAAAAAA', $this->session, 'original state untouched');
+        }
+    }
+
+    public function testNamedChoiceWithForeignStateIsAFreshQuestionAndCanClarify()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY, self::CLARIFY_REPLY);
+        $p = $this->ask('How do I change my password?')['pendingId'];
+        $other = [];
+        $r = $this->service($other)->handle('password', [], 'tabAAAAAAAA', $p);
+        $this->assertStringContainsString("CLARIFY:allowed\nQ:password", $this->chat->lastPrompt());
+        $this->assertSame(Outcome::CLARIFY, $r['outcome']);
+        $this->assertStringNotContainsString('(VPN)', json_encode($this->chat->calls));
+    }
+
+    public function testInvalidConversationIdGetsFreshStateAndStillClarifies()
+    {
+        foreach (['bad id!', '', str_repeat('x', 65)] as $conv) {
+            $this->session = [];
+            $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse vpnctl.");
+            $r = $this->ask('How do I change my password?', $conv);
+            $this->assertSame(Outcome::CLARIFY, $r['outcome'], var_export($conv, true));
+            $this->assertStringContainsString('CLARIFY:allowed', $this->chat->lastPrompt());
+            $this->assertNotSame($conv, $r['conversationId']);
+            $this->assertTrue(PendingStore::isValidConversationId($r['conversationId']));
+            $this->assertArrayHasKey($r['conversationId'], $this->session);
+            // the client adopts the fresh id and the follow-up works
+            $r2 = $this->ask('2', $r['conversationId'], $r['pendingId']);
+            $this->assertSame(Outcome::ANSWER, $r2['outcome']);
+            $this->assertStringContainsString('(VPN)', $this->chat->lastPrompt());
+        }
+    }
+
+    public function testPendingIdIsSingleUse()
+    {
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse vpnctl.");
+        $p = $this->ask('How do I change my password?')['pendingId'];
+        $this->assertSame(Outcome::ANSWER, $this->ask('2', 'tabAAAAAAAA', $p)['outcome']);
+        $calls = count($this->chat->calls);
+        $this->assertSame(Outcome::NOTICE, $this->ask('3', 'tabAAAAAAAA', $p)['outcome'], 'replay of a used id');
+        $this->assertCount($calls, $this->chat->calls);
+    }
+
+    // 9. empty / all-unauthorized retrieval -> exact text, no answer-model call
+    public function testNoInformationWithoutModelCall()
+    {
+        $r = $this->ask('xyzzy plugh');
+        $this->assertSame(Outcome::NO_INFORMATION, $r['outcome']);
+        $this->assertSame('The Wiki does not contain information on that topic.', $r['answer']);
+        $this->assertSame([], $r['sources']);
+        $this->assertCount(0, $this->chat->calls);
+
+        $r = $this->ask('confidential HIDDEN-HR-MARKER procedure'); // only matches the denied page... and none else
+        $this->assertCount(0, $this->chat->calls);
+        $this->assertSame(Outcome::NO_INFORMATION_TEXT, $r['answer']);
+    }
+
+    // 10. nonempty irrelevant context abstains
+    public function testIrrelevantContextAbstains()
+    {
+        $this->chat->queue("DECISION: NO_INFORMATION");
+        $r = $this->ask('Which coffee beans does the Friday team prefer?');
+        $this->assertSame(Outcome::NO_INFORMATION_TEXT, $r['answer']);
+        $this->assertSame([], $r['sources']);
+    }
+
+    // 11. outages and malformed output are errors, not "no information"
+    public function testErrors()
+    {
+        $this->chat->queue(new ModelException('connect to http://10.0.0.5:8080 failed, token abc'));
+        $r = $this->ask('How do I change my password?');
+        $this->assertSame(Outcome::ERROR, $r['outcome']);
+        $this->assertSame('model_error', $r['errorCategory']);
+        $this->assertStringContainsString($r['correlationId'], $r['answer']);
+        $this->assertStringNotContainsString('10.0.0.5', $r['answer']);
+        $this->assertStringNotContainsString(Outcome::NO_INFORMATION_TEXT, $r['answer']);
+
+        $this->chat->queue('Sure! Here is everything...', 'still no format');
+        $r = $this->ask('How do I change my password?');
+        $this->assertSame('model_malformed', $r['errorCategory']);
+
+        $this->chat->queue('oops', "DECISION: ANSWER\nUSED: S2\nANSWER:\nRecovered.");
+        $r = $this->ask('How do I change my VPN password?');
+        $this->assertSame(Outcome::ANSWER, $r['outcome']);
+
+        $broken = new ConversationService(
+            static function () { throw new \RuntimeException('qdrant https://q.internal:6333 down'); },
+            $this->chat, static fn($v) => '', new PendingStore($this->session)
+        );
+        $r = $broken->handle('anything', [], 'tabAAAAAAAA');
+        $this->assertSame('backend_error', $r['errorCategory']);
+        $this->assertStringNotContainsString('q.internal', $r['answer']);
+    }
+
+    // credential volunteered by the user: not sent to the model, warning shown
+    public function testSecretRedaction()
+    {
+        $this->chat->queue("DECISION: ANSWER\nUSED: S1\nANSWER:\nOpen webmail settings.");
+        $r = $this->ask('my email password is Hunter2!x how do I change it');
+        $this->assertStringNotContainsString('Hunter2!x', json_encode($this->chat->calls));
+        $this->assertStringNotContainsString('Hunter2!x', $r['question']);
+        $this->assertTrue($r['redacted']);
+        $this->assertNotSame('', $r['warning']);
+    }
+
+    // 17. retrieved prompt injection cannot add unauthorized sources
+    public function testInjectedModelOutputCannotAddSources()
+    {
+        $this->chat->queue("DECISION: ANSWER\nUSED: S1, S99\nANSWER:\nSee [HR](/doku.php?id=it:hr:password) [S99].");
+        $r = $this->ask('How do I change my VPN password?');
+        $pages = array_map(fn($c) => $c->getPage(), $r['sources']);
+        $this->assertNotContains('it:hr:password', $pages);
+        $this->assertStringNotContainsString('S99', $r['answer']);
+    }
+}

@@ -15,3 +15,6 @@ $lang['close-button'] = 'Close';
 $lang['fullscreen-button'] = 'Toggle fullscreen';
 $lang['pagecontext'] = 'Enable to ask about the current page.';
 $lang['js']['error'] = 'Sorry, something went wrong';
+
+$lang['error'] = 'Sorry, the AI chat service is currently unavailable. Please try again later. Reference: %s';
+$lang['sectok'] = 'Your session has expired. Please reload the page and try again. Reference: %s';

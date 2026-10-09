@@ -4,6 +4,12 @@ use dokuwiki\Extension\CLIPlugin;
 use dokuwiki\Extension\Plugin;
 use dokuwiki\plugin\aichat\AIChat;
 use dokuwiki\plugin\aichat\Chunk;
+use dokuwiki\plugin\aichat\Conversation\AnswerFormatter;
+use dokuwiki\plugin\aichat\Conversation\ConversationService;
+use dokuwiki\plugin\aichat\Conversation\FailingChat;
+use dokuwiki\plugin\aichat\Conversation\Outcome;
+use dokuwiki\plugin\aichat\Conversation\PendingStore;
+use dokuwiki\plugin\aichat\Conversation\SessionBridge;
 use dokuwiki\plugin\aichat\Embeddings;
 use dokuwiki\plugin\aichat\Model\ChatInterface;
 use dokuwiki\plugin\aichat\Model\EmbeddingInterface;
@@ -20,6 +26,11 @@ class helper_plugin_aichat extends Plugin
 {
     /** @var ModelFactory */
     public $factory;
+
+    /** @var array test seam, see setConversationOverrides() */
+    protected $conversationOverrides = [];
+    /** @var array backing data for the PendingStore of this request */
+    protected $pendingData = [];
 
     /** @var CLIPlugin $logger */
     protected $logger;
@@ -194,24 +205,7 @@ class helper_plugin_aichat extends Plugin
      */
     public function askQuestion($question, $history = [], $contextQuestion = '', $sourcePage = '')
     {
-        if ($sourcePage) {
-            // only the current page is context
-            $similar = $this->getEmbeddings()->getPageChunks($sourcePage);
-        } else {
-            if ($this->getConf('fullpagecontext')) {
-                // match chunks but use full pages as context
-                $similar = $this->getEmbeddings()->getSimilarPages(
-                    $contextQuestion ?: $question,
-                    $this->getLanguageLimit(),
-                    (int) $this->getConf('fullpagecontext')
-                );
-            } else {
-                // use the chunks as context
-                $similar = $this->getEmbeddings()->getSimilarChunks(
-                    $contextQuestion ?: $question, $this->getLanguageLimit()
-                );
-            }
-        }
+        $similar = $this->retrieve($contextQuestion ?: $question, $sourcePage);
 
         if ($similar) {
             $context = implode(
@@ -224,19 +218,23 @@ class helper_plugin_aichat extends Plugin
                 'customprompt' => $this->getConf('customprompt'),
             ]);
         } else {
-            $prompt = $this->getPrompt('noanswer', [
+            // no usable authorized context: deterministic answer, no model call, no permission hints
+            return [
                 'question' => $question,
-            ]);
-            $history = [];
+                'contextQuestion' => $contextQuestion,
+                'answer' => Outcome::NO_INFORMATION_TEXT,
+                'sources' => [],
+            ];
         }
 
+        $chat = $this->conversationOverrides['chat'] ?? $this->getChatModel();
         $messages = $this->prepareMessages(
-            $this->getChatModel(),
+            $chat,
             $prompt,
             $history,
             $this->getConf('chatHistory')
         );
-        $answer = $this->getChatModel()->getAnswer($messages);
+        $answer = $chat->getAnswer($messages);
 
         return [
             'question' => $question,
@@ -244,6 +242,132 @@ class helper_plugin_aichat extends Plugin
             'answer' => $answer,
             'sources' => $similar,
         ];
+    }
+
+    /**
+     * Retrieve the context chunks for a query. All paths only return chunks the current user may read
+     * (ACL checks and similarity threshold are applied in Embeddings).
+     *
+     * @param string $query
+     * @param string $sourcePage if given, only this page is used as context
+     * @return Chunk[]
+     */
+    public function retrieve($query, $sourcePage = '')
+    {
+        if (isset($this->conversationOverrides['retriever'])) {
+            return ($this->conversationOverrides['retriever'])($query);
+        }
+        if ($sourcePage) {
+            // only the current page is context
+            return $this->getEmbeddings()->getPageChunks($sourcePage);
+        }
+        if ($this->getConf('fullpagecontext')) {
+            // match chunks but use full pages as context
+            return $this->getEmbeddings()->getSimilarPages(
+                $query,
+                $this->getLanguageLimit(),
+                (int) $this->getConf('fullpagecontext')
+            );
+        }
+        // use the chunks as context
+        return $this->getEmbeddings()->getSimilarChunks($query, $this->getLanguageLimit());
+    }
+
+    /**
+     * Handle a web chat turn with grounded clarification (ANSWER, CLARIFY, NO_INFORMATION, NOTICE, ERROR)
+     *
+     * @param string $question raw user input
+     * @param array $history untrusted client history, display/context only
+     * @param string $conversation per-tab conversation id (lookup key only)
+     * @param string $pendingId pending clarification id echoed by the client (lookup key only)
+     * @param string $sourcePage page context
+     * @return array see ConversationService::result()
+     */
+    public function askConversational($question, $history, $conversation, $pendingId, $sourcePage = '')
+    {
+        $o = $this->conversationOverrides;
+        $chat = $o['chat'] ?? null;
+        if (!$chat) {
+            try {
+                $chat = $this->getChatModel();
+            } catch (\Throwable $e) {
+                $chat = new FailingChat($e);
+            }
+        }
+        $retriever = $o['retriever'] ?? fn($query) => $this->retrieve($query, $sourcePage);
+        $rephraser = null;
+        if ($this->getConf('rephraseHistory') > 0) {
+            $rephraser = $o['rephraser'] ?? fn($q, $h) => $this->rephraseChatQuestion($q, $h);
+        }
+
+        $service = new ConversationService(
+            $retriever,
+            $chat,
+            fn(array $vars) => $this->getPrompt('decide', [
+                'context' => $vars['context'],
+                'question' => $vars['question'],
+                'clarify' => $vars['clarify'],
+                'customprompt' => $this->getConf('customprompt'),
+            ]),
+            $o['pendingStore'] ?? $this->getPendingStore(),
+            [
+                'maxHistoryRows' => max((int)$this->getConf('chatHistory'), (int)$this->getConf('rephraseHistory')),
+                'chatHistoryRows' => (int)$this->getConf('chatHistory'),
+            ],
+            [],
+            $rephraser,
+            static fn($page) => p_get_first_heading($page) ?: $page,
+            new AnswerFormatter([self::class, 'wikiPageFromUrl']),
+            $o['trace'] ?? null
+        );
+        return $service->handle((string)$question, $history, (string)$conversation, (string)$pendingId);
+    }
+
+    /**
+     * Pending clarification store bound to the current session and user
+     *
+     * @return PendingStore
+     */
+    public function getPendingStore()
+    {
+        global $INPUT;
+        $bridge = new SessionBridge($INPUT->server->str('REMOTE_USER'));
+        $this->pendingData = $bridge->read();
+        return new PendingStore($this->pendingData, static fn(array $data) => $bridge->write($data));
+    }
+
+    /**
+     * Test seam: replace collaborators of askConversational (keys: chat, retriever, rephraser, pendingStore, trace)
+     *
+     * @param array $overrides
+     * @return void
+     */
+    public function setConversationOverrides(array $overrides)
+    {
+        $this->conversationOverrides = $overrides;
+    }
+
+    /**
+     * Map a link target to a local wiki page id, null for anything else
+     *
+     * @param string $url
+     * @return string|null
+     */
+    public static function wikiPageFromUrl($url)
+    {
+        $parts = parse_url(html_entity_decode($url));
+        if ($parts === false) return null;
+        if (!empty($parts['host']) && $parts['host'] !== ($_SERVER['HTTP_HOST'] ?? '')) return null;
+        if (!empty($parts['query'])) {
+            parse_str($parts['query'], $q);
+            if (!empty($q['id']) && is_string($q['id'])) return cleanID($q['id']);
+        }
+        $path = $parts['path'] ?? '';
+        if (preg_match('#doku\.php/(.+)$#', $path, $m)) return cleanID(str_replace('/', ':', $m[1]));
+        if (empty($parts['host']) && empty($parts['scheme']) && $path !== '' && $path[0] !== '/' && strpos($path, ':') !== false) {
+            return cleanID($path); // bare page id like ns:page
+        }
+        return null;
     }
 
     /**

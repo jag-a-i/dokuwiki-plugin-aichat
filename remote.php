@@ -3,7 +3,10 @@
 use dokuwiki\Extension\RemotePlugin;
 use dokuwiki\plugin\aichat\RemoteResponse\Chunk;
 use dokuwiki\plugin\aichat\RemoteResponse\LlmReply;
+use dokuwiki\plugin\aichat\Conversation\ErrorReporter;
+use dokuwiki\plugin\aichat\Conversation\SecretRedactor;
 use dokuwiki\Remote\AccessDeniedException;
+use dokuwiki\Remote\RemoteException;
 
 /**
  * DokuWiki Plugin aichat (Action Component)
@@ -62,7 +65,12 @@ class remote_plugin_aichat extends RemotePlugin
     public function ask($query, $model = '', $lang = '')
     {
         $helper = $this->initHelper($model, $lang);
-        $result = $helper->askQuestion($query);
+        [$query] = (new SecretRedactor())->redact((string)$query);
+        try {
+            $result = $helper->askQuestion($query);
+        } catch (\Throwable $e) {
+            throw $this->serviceError('ask', $e);
+        }
 
         return new LlmReply($result);
     }
@@ -90,15 +98,18 @@ class remote_plugin_aichat extends RemotePlugin
         $helper = $this->initHelper('', $lang);
         $langlimit = $helper->getLanguageLimit();
 
-        $embeddings = $helper->getEmbeddings();
-        if ($max !== -1) {
-            $embeddings->setConfigContextChunks($max);
+        try {
+            $embeddings = $helper->getEmbeddings();
+            if ($max !== -1) {
+                $embeddings->setConfigContextChunks($max);
+            }
+            if ($threshold !== -1) {
+                $embeddings->setSimilarityThreshold($threshold);
+            }
+            $sources = $embeddings->getSimilarChunks($query, $langlimit, false);
+        } catch (\Throwable $e) {
+            throw $this->serviceError('similar', $e);
         }
-        if ($threshold !== -1) {
-            $embeddings->setSimilarityThreshold($threshold);
-        }
-
-        $sources = $embeddings->getSimilarChunks($query, $langlimit, false);
 
         $results = [];
         foreach ($sources as $source) {
@@ -107,4 +118,18 @@ class remote_plugin_aichat extends RemotePlugin
         return $results;
     }
 
+
+    /**
+     * Log a sanitized error and return a non-leaking exception for the remote API client
+     *
+     * @param string $where
+     * @param Throwable $e
+     * @return RemoteException
+     */
+    protected function serviceError($where, $e)
+    {
+        $ref = ErrorReporter::newCorrelationId();
+        ErrorReporter::log('remote ' . $where, ErrorReporter::category($e), $ref, $e);
+        return new RemoteException('AI chat service error. Reference: ' . $ref, 112);
+    }
 }
