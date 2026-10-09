@@ -104,6 +104,42 @@ class SpoolProvenanceTest extends \DokuWikiTest
         $this->assertStringNotContainsString(self::MARKER, json_encode($this->sent ? array_slice($this->sent, 1) : []));
     }
 
+    public function provideCaseSensitiveParts(): array
+    {
+        return [
+            'path case' => ['https://collector.example.invalid/TenantA/v1/traces', 'https://collector.example.invalid/tenanta/v1/traces'],
+            'query value case' => ['https://collector.example.invalid/v1/traces?project=ProjectA', 'https://collector.example.invalid/v1/traces?project=projecta'],
+            'query key case' => ['https://collector.example.invalid/v1/traces?Project=A', 'https://collector.example.invalid/v1/traces?project=A'],
+        ];
+    }
+
+    /**
+     * Same backend, same credentials: only the case of a path or query part differs -> different destination.
+     * @dataProvider provideCaseSensitiveParts
+     */
+    public function testCaseSensitivePathAndQueryNeverShareABacklog(string $a, string $b)
+    {
+        $confA = $this->conf(['telemetry' => 'otlp', 'telemetry_endpoint' => $a, 'telemetry_otlp_authorization' => 'Bearer same']);
+        $confB = $this->conf(['telemetry' => 'otlp', 'telemetry_endpoint' => $b, 'telemetry_otlp_authorization' => 'Bearer same']);
+        $this->assertNotSame(ExporterFactory::spoolNamespace($confA), ExporterFactory::spoolNamespace($confB));
+        $sent = $this->turn($confA, 'question with ' . self::MARKER, 503);
+        $this->assertStringContainsString(self::MARKER, $sent[0]['body']);
+        $sent = $this->turn($confB, 'metadata only', 200);
+        $this->assertCount(1, $sent, 'no backlog replay to the case-different destination');
+        $this->assertSame($b, $sent[0]['url']);
+        $this->assertStringNotContainsString(self::MARKER, $sent[0]['body']);
+        $this->assertSame(1, $this->spooledFiles());
+    }
+
+    public function testOnlySchemeAndHostAreCaseNormalized()
+    {
+        $n = fn($u) => ExporterFactory::spoolNamespace($this->conf(['telemetry_endpoint' => $u]));
+        $this->assertSame($n('https://langfuse-a.example.invalid'), $n('HTTPS://Langfuse-A.Example.INVALID/'));
+        $this->assertSame('https://lf.example.invalid:8443/Tenant/x?P=Q', ExporterFactory::normalizeEndpoint('HTTPS://LF.Example.invalid:8443/Tenant/x?P=Q'));
+        $this->assertNotSame($n('https://lf.example.invalid/a'), $n('https://lf.example.invalid/a/'), 'trailing slash on a path is kept');
+        $this->assertNotSame($n('https://lf.example.invalid:443'), $n('https://lf.example.invalid:8443'));
+    }
+
     /** positive control: the backlog IS delivered to exactly the same configuration */
     public function testBacklogIsFlushedToTheSameConfiguration()
     {

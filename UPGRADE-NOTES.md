@@ -142,7 +142,9 @@ the installed production revision and settings are unknown. Tested only in a san
   bodies count as accepted but are flagged (`response=empty|malformed`); the preflight reports partial
   acceptance as a failure. Responses are read up to 64 KB.
 - Spool provenance: the namespace is a one-way hash of backend, endpoint URL, credential identity and
-  capture policy (no URL or key in clear text on disk). Queued traces are ONLY re-sent to exactly the
+  capture policy (no URL or key in clear text on disk). Only the URL scheme and host are
+  case-normalized; port, path and query are compared exactly (they can be case-sensitive, e.g.
+  tenant or project selectors), and an empty path equals "/". Queued traces are ONLY re-sent to exactly the
   same combination. After changing the endpoint, project keys, backend or `telemetry_capture`, older
   backlogs are never sent anywhere (no automatic migration); they are deleted once older than
   `telemetry_spool_days`, at most 5 obsolete namespaces are kept, and spool files from earlier

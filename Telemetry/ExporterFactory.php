@@ -70,18 +70,39 @@ class ExporterFactory
     public static function spoolNamespace(array $conf): string
     {
         $backend = (string)($conf['telemetry'] ?? 'off');
-        $endpoint = rtrim(trim((string)($conf['telemetry_endpoint'] ?? '')), '/');
+        $endpoint = self::normalizeEndpoint((string)($conf['telemetry_endpoint'] ?? ''));
         $cred = $backend === 'langfuse'
             ? (string)($conf['telemetry_langfuse_public'] ?? '') . ':' . (string)($conf['telemetry_langfuse_secret'] ?? '')
             : (string)($conf['telemetry_otlp_authorization'] ?? '');
         $id = json_encode([
             'v' => 1,
             'backend' => $backend,
-            'endpoint' => strtolower($endpoint),
+            'endpoint' => $endpoint,
             'credential' => hash('sha256', 'aichat-spool-cred|' . $cred),
             'capture' => self::capturePolicy($conf),
         ]);
         return substr(hash('sha256', 'aichat-spool|' . $id), 0, 32);
+    }
+
+    /**
+     * Endpoint identity for spool namespacing: ONLY scheme and host are case-insensitive and lowercased.
+     * Port, path and query are kept exactly (paths and query values such as tenant/project selectors
+     * can be case-sensitive). The only other equivalence: an empty path equals "/".
+     */
+    public static function normalizeEndpoint(string $url): string
+    {
+        $url = trim($url);
+        $p = parse_url($url);
+        if ($p === false || empty($p['host'])) return $url; // unparseable: exact string
+        $out = strtolower($p['scheme'] ?? '') . '://';
+        if (isset($p['user'])) $out .= $p['user'] . (isset($p['pass']) ? ':' . $p['pass'] : '') . '@';
+        $out .= strtolower($p['host']);
+        if (isset($p['port'])) $out .= ':' . $p['port'];
+        $path = $p['path'] ?? '';
+        $out .= ($path === '' ? '/' : $path);
+        if (isset($p['query'])) $out .= '?' . $p['query'];
+        if (isset($p['fragment'])) $out .= '#' . $p['fragment'];
+        return $out;
     }
 
     /**

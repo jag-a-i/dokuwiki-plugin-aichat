@@ -41,6 +41,12 @@ Independent review (OTLP compliance, FIXED): every 2xx was treated as full succe
 body; partial success is recorded as a sanitized count and never retried. While wiring this, the real-
 transport tests caught a TypeError (closure return type `int`) that the mocked tests could not see.
 
+Final security recheck (FIXED): the spool namespace lowercased the whole endpoint URL, so case-different paths
+or query values (e.g. /TenantA vs /tenanta, ?project=ProjectA vs projecta) with the same credentials shared a
+backlog and could replay it to a different destination. Now only scheme and host are normalized; path/query
+are exact. Regression for path case, query value case and query key case (no backlog replay); fails on the
+previous code.
+
 Findings of this pass:
 - FIXED: remote `similar` sent the query unredacted to the embedding endpoint (`ask` already redacted).
 - FIXED (packaging): upstream `.gitattributes` export-ignores `_test/`; earlier checkpoint zips made with
