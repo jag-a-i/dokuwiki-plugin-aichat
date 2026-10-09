@@ -47,6 +47,12 @@ backlog and could replay it to a different destination. Now only scheme and host
 are exact. Regression for path case, query value case and query key case (no backlog replay); fails on the
 previous code.
 
+Final URL identity (FIXED): the namespace is now computed from the exact effective request URL via the same
+function that builds the exporter URL (Langfuse ingest URL derivation; generic OTLP as-is incl. trailing slash);
+only scheme/host case is normalized. URLs with userinfo credentials are rejected. Note: e8b9085 already kept
+path/query case and trailing slashes; the new regressions lock that in, and the effective-URL and userinfo
+tests fail on e8b9085.
+
 Findings of this pass:
 - FIXED: remote `similar` sent the query unredacted to the embedding endpoint (`ask` already redacted).
 - FIXED (packaging): upstream `.gitattributes` export-ignores `_test/`; earlier checkpoint zips made with

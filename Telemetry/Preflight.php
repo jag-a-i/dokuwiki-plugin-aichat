@@ -18,8 +18,13 @@ class Preflight
     {
         $exporter = ExporterFactory::create($conf, $http, null); // no spool: a preflight must not queue anything
         if (!$exporter) {
+            $why = ExporterFactory::configError($conf);
+            $messages = [
+                'credentials_in_url' => 'The endpoint URL contains credentials (user:pass@). Remove them; use the key settings instead.',
+                'invalid_endpoint' => 'The endpoint must be an absolute http(s) URL.',
+            ];
             return ['ok' => false, 'status' => 0, 'result' => 'not_configured',
-                'message' => 'Export is off or incompletely configured (telemetry, telemetry_endpoint and keys).'];
+                'message' => $messages[$why] ?? 'Export is off or incompletely configured (telemetry, telemetry_endpoint and keys).'];
         }
         $t = new TraceRecorder([]);
         $s = $t->start('preflight', ['synthetic' => true]);

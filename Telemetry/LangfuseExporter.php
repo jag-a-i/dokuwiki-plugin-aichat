@@ -24,12 +24,18 @@ class LangfuseExporter extends OtlpHttpExporter
     public static function create(string $baseUrl, string $publicKey, string $secretKey, callable $http,
                                   int $timeout = 2, int $retries = 1, ?Spool $spool = null): self
     {
-        $url = rtrim($baseUrl, '/');
-        if (!str_ends_with($url, self::PATH)) $url .= self::PATH;
-        return new self($url, [
+        return new self(self::ingestUrl($baseUrl), [
             'Authorization' => 'Basic ' . base64_encode($publicKey . ':' . $secretKey),
             'x-langfuse-ingestion-version' => '4',
         ], $http, $timeout, $retries, $spool);
+    }
+
+    /** the exact URL traces are POSTed to for a configured base URL (also used for spool namespacing) */
+    public static function ingestUrl(string $baseUrl): string
+    {
+        $url = rtrim(trim($baseUrl), '/');
+        if (!str_ends_with($url, self::PATH)) $url .= self::PATH;
+        return $url;
     }
 
     public function getName(): string

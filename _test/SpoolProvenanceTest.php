@@ -110,6 +110,7 @@ class SpoolProvenanceTest extends \DokuWikiTest
             'path case' => ['https://collector.example.invalid/TenantA/v1/traces', 'https://collector.example.invalid/tenanta/v1/traces'],
             'query value case' => ['https://collector.example.invalid/v1/traces?project=ProjectA', 'https://collector.example.invalid/v1/traces?project=projecta'],
             'query key case' => ['https://collector.example.invalid/v1/traces?Project=A', 'https://collector.example.invalid/v1/traces?project=A'],
+            'generic OTLP trailing slash' => ['https://collector.example.invalid/v1/traces', 'https://collector.example.invalid/v1/traces/'],
         ];
     }
 
@@ -136,8 +137,53 @@ class SpoolProvenanceTest extends \DokuWikiTest
         $n = fn($u) => ExporterFactory::spoolNamespace($this->conf(['telemetry_endpoint' => $u]));
         $this->assertSame($n('https://langfuse-a.example.invalid'), $n('HTTPS://Langfuse-A.Example.INVALID/'));
         $this->assertSame('https://lf.example.invalid:8443/Tenant/x?P=Q', ExporterFactory::normalizeEndpoint('HTTPS://LF.Example.invalid:8443/Tenant/x?P=Q'));
-        $this->assertNotSame($n('https://lf.example.invalid/a'), $n('https://lf.example.invalid/a/'), 'trailing slash on a path is kept');
+        // Langfuse: base URLs that yield the SAME effective ingest URL share a namespace, others do not
+        $this->assertSame(ExporterFactory::effectiveUrl($this->conf(['telemetry_endpoint' => 'https://lf.example.invalid/a'])),
+            ExporterFactory::effectiveUrl($this->conf(['telemetry_endpoint' => 'https://lf.example.invalid/a/'])));
+        $this->assertSame($n('https://lf.example.invalid/a'), $n('https://lf.example.invalid/a/'), 'same effective ingest URL');
+        $this->assertSame($n('https://lf.example.invalid'), $n('https://lf.example.invalid/api/public/otel/v1/traces'), 'same effective ingest URL');
+        $this->assertNotSame($n('https://lf.example.invalid/A'), $n('https://lf.example.invalid/a'));
+        // generic OTLP: the URL is used as-is, so a trailing slash is a different request URL
+        $o = fn($u) => ExporterFactory::spoolNamespace($this->conf(['telemetry' => 'otlp', 'telemetry_endpoint' => $u]));
+        $this->assertNotSame($o('https://c.example.invalid/v1/traces'), $o('https://c.example.invalid/v1/traces/'));
+        $this->assertSame($o('https://c.example.invalid/v1/traces'), $o('HTTPS://C.Example.Invalid/v1/traces'));
         $this->assertNotSame($n('https://lf.example.invalid:443'), $n('https://lf.example.invalid:8443'));
+    }
+
+    /** the namespace is derived from the exact URL the exporter really posts to */
+    public function testNamespaceUsesTheExactEffectiveRequestUrl()
+    {
+        foreach ([
+            $this->conf(),
+            $this->conf(['telemetry_endpoint' => 'https://lf.example.invalid/sub/']),
+            $this->conf(['telemetry' => 'otlp', 'telemetry_endpoint' => 'https://c.example.invalid/v1/traces/?t=X']),
+        ] as $conf) {
+            $urls = [];
+            $e = ExporterFactory::create($conf, function ($url) use (&$urls) { $urls[] = $url; return 200; });
+            $t = new \dokuwiki\plugin\aichat\Telemetry\TraceRecorder();
+            $t->finish();
+            $e->export($t->toArray() + ['sessionId' => 's', 'release' => 'r']);
+            $this->assertSame(ExporterFactory::effectiveUrl($conf), $urls[0], 'namespace input == request URL');
+        }
+    }
+
+    public function provideUserinfoUrls(): array
+    {
+        return [['https://user:secret@lf.example.invalid'], ['https://user@lf.example.invalid'], ['https://:secret@lf.example.invalid']];
+    }
+
+    /** credentials embedded in the URL are refused, nothing is sent or spooled @dataProvider provideUserinfoUrls */
+    public function testUserinfoInEndpointIsRejected(string $url)
+    {
+        foreach (['langfuse', 'otlp'] as $backend) {
+            $conf = $this->conf(['telemetry' => $backend, 'telemetry_endpoint' => $url]);
+            $this->assertSame('credentials_in_url', ExporterFactory::configError($conf));
+            $this->assertNull(ExporterFactory::create($conf, fn() => 200));
+            $r = \dokuwiki\plugin\aichat\Telemetry\Preflight::run($conf, function () { $this->fail('no request'); });
+            $this->assertStringContainsString('contains credentials', $r['message']);
+            $this->assertSame([], $this->turn($conf, 'q ' . self::MARKER, 200), 'nothing sent');
+            $this->assertSame(0, $this->spooledFiles(), 'nothing spooled');
+        }
     }
 
     /** positive control: the backlog IS delivered to exactly the same configuration */

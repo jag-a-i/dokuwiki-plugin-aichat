@@ -30,24 +30,61 @@ class ExporterFactory
         $backend = (string)($conf['telemetry'] ?? 'off');
         $timeout = (int)($conf['telemetry_timeout'] ?? 2);
         $retries = (int)($conf['telemetry_retries'] ?? 1);
-        $endpoint = trim((string)($conf['telemetry_endpoint'] ?? ''));
         if (isset(self::$factories[$backend])) {
             return (self::$factories[$backend])($conf, $http, $spool);
         }
+        if (self::configError($conf) !== '') return null;
+        $url = self::effectiveUrl($conf);
         switch ($backend) {
             case 'langfuse':
-                $pk = (string)($conf['telemetry_langfuse_public'] ?? '');
-                $sk = (string)($conf['telemetry_langfuse_secret'] ?? '');
-                if ($endpoint === '' || $pk === '' || $sk === '') return null;
-                return LangfuseExporter::create($endpoint, $pk, $sk, $http, $timeout, $retries, $spool);
+                return new LangfuseExporter($url, [
+                    'Authorization' => 'Basic ' . base64_encode(
+                        (string)$conf['telemetry_langfuse_public'] . ':' . (string)$conf['telemetry_langfuse_secret']
+                    ),
+                    'x-langfuse-ingestion-version' => '4',
+                ], $http, $timeout, $retries, $spool);
             case 'otlp':
-                if ($endpoint === '') return null;
                 $headers = [];
                 $auth = (string)($conf['telemetry_otlp_authorization'] ?? '');
                 if ($auth !== '') $headers['Authorization'] = $auth;
-                return new OtlpHttpExporter($endpoint, $headers, $http, $timeout, $retries, $spool);
+                return new OtlpHttpExporter($url, $headers, $http, $timeout, $retries, $spool);
             default:
                 return null;
+        }
+    }
+
+    /**
+     * Why the built-in backends cannot be used with this configuration ('' = usable).
+     * URLs with embedded credentials (user:pass@) are rejected: secrets belong in the key settings.
+     */
+    public static function configError(array $conf): string
+    {
+        $backend = (string)($conf['telemetry'] ?? 'off');
+        if (!in_array($backend, ['langfuse', 'otlp'], true)) return 'disabled';
+        $endpoint = trim((string)($conf['telemetry_endpoint'] ?? ''));
+        if ($endpoint === '') return 'no_endpoint';
+        $p = parse_url($endpoint);
+        if ($p === false || empty($p['host']) || !in_array(strtolower($p['scheme'] ?? ''), ['http', 'https'], true)) {
+            return 'invalid_endpoint';
+        }
+        if (isset($p['user']) || isset($p['pass'])) return 'credentials_in_url';
+        if ($backend === 'langfuse' && (($conf['telemetry_langfuse_public'] ?? '') === '' || ($conf['telemetry_langfuse_secret'] ?? '') === '')) {
+            return 'no_keys';
+        }
+        return '';
+    }
+
+    /** the exact URL the configured built-in backend POSTs to ('' if not usable) */
+    public static function effectiveUrl(array $conf): string
+    {
+        $endpoint = trim((string)($conf['telemetry_endpoint'] ?? ''));
+        switch ((string)($conf['telemetry'] ?? 'off')) {
+            case 'langfuse':
+                return $endpoint === '' ? '' : LangfuseExporter::ingestUrl($endpoint);
+            case 'otlp':
+                return $endpoint;
+            default:
+                return '';
         }
     }
 
@@ -70,7 +107,7 @@ class ExporterFactory
     public static function spoolNamespace(array $conf): string
     {
         $backend = (string)($conf['telemetry'] ?? 'off');
-        $endpoint = self::normalizeEndpoint((string)($conf['telemetry_endpoint'] ?? ''));
+        $endpoint = self::normalizeEndpoint(self::effectiveUrl($conf));
         $cred = $backend === 'langfuse'
             ? (string)($conf['telemetry_langfuse_public'] ?? '') . ':' . (string)($conf['telemetry_langfuse_secret'] ?? '')
             : (string)($conf['telemetry_otlp_authorization'] ?? '');
@@ -85,9 +122,9 @@ class ExporterFactory
     }
 
     /**
-     * Endpoint identity for spool namespacing: ONLY scheme and host are case-insensitive and lowercased.
-     * Port, path and query are kept exactly (paths and query values such as tenant/project selectors
-     * can be case-sensitive). The only other equivalence: an empty path equals "/".
+     * Endpoint identity for spool namespacing, applied to the EXACT effective request URL: ONLY scheme
+     * and host are lowercased. Port, path (incl. trailing slash), query and fragment are kept exactly.
+     * The only other equivalence: an empty path equals "/" (the HTTP client requests "/" for both).
      */
     public static function normalizeEndpoint(string $url): string
     {
@@ -95,7 +132,7 @@ class ExporterFactory
         $p = parse_url($url);
         if ($p === false || empty($p['host'])) return $url; // unparseable: exact string
         $out = strtolower($p['scheme'] ?? '') . '://';
-        if (isset($p['user'])) $out .= $p['user'] . (isset($p['pass']) ? ':' . $p['pass'] : '') . '@';
+        if (isset($p['user']) || isset($p['pass'])) $out .= 'userinfo-rejected@'; // never hashed or stored; configError() refuses
         $out .= strtolower($p['host']);
         if (isset($p['port'])) $out .= ':' . $p['port'];
         $path = $p['path'] ?? '';
