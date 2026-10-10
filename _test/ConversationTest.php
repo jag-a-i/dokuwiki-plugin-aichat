@@ -3,6 +3,7 @@
 namespace dokuwiki\plugin\aichat\test;
 
 use dokuwiki\plugin\aichat\Conversation\ConversationService;
+use dokuwiki\plugin\aichat\Conversation\FollowupResolver;
 use dokuwiki\plugin\aichat\Conversation\Outcome;
 use dokuwiki\plugin\aichat\Conversation\PendingStore;
 use dokuwiki\plugin\aichat\Model\ModelException;
@@ -400,6 +401,107 @@ class ConversationTest extends \DokuWikiTest
         $r = $this->ask('How do I change my password?');
         $this->ask('the CRM one, not VPN', 'tabAAAAAAAA', $r['pendingId']);
         $this->assertStringContainsString('(CRM)', $this->chat->lastPrompt());
+    }
+
+    public function providePolaritySafeResolverCases(): array
+    {
+        $options = static fn(array $labels): array => array_map(
+            static fn(string $label): array => ['label' => $label, 'pages' => []],
+            $labels
+        );
+        $calendar = $options(['Calendar', 'Payroll', 'Drive']);
+        $desk = $options(['Desk', 'Desk Token', 'Portal']);
+        $accounts = $options(['E-Mail', 'VPN', 'CRM']);
+
+        return [
+            'prefix rejection and trailing negation' => [
+                $calendar, 'not Payroll, but Drive is not it', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'mixed case punctuation and curly apostrophe' => [
+                $calendar, 'NOT PAYROLL — but DRIVE isn’t it either.', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'conjunction rejects both named options' => [
+                $calendar, 'not Payroll and Drive', FollowupResolver::REJECT, null, [1, 2], false,
+            ],
+            'reordered labels with a trailing correction' => [
+                $calendar, 'Drive is not it, not Payroll either', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'uncertain leftover after a rejection' => [
+                $desk, 'not Portal, but maybe Desk Token', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'uncertain direct mention' => [
+                $desk, 'Maybe Desk Token', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'overlapping positive label keeps longest identity' => [
+                $desk, 'the Desk Token one, not Portal', FollowupResolver::CHOICE, 1, [], false,
+            ],
+            'overlapping positive after contrast remains valid' => [
+                $desk, 'not Portal, but Desk Token', FollowupResolver::CHOICE, 1, [], false,
+            ],
+            'positive option after rejected option remains valid' => [
+                $calendar, 'not Payroll, but Drive', FollowupResolver::CHOICE, 2, [], false,
+            ],
+            'positive CRM after rejected VPN remains valid' => [
+                $accounts, 'not VPN, but CRM', FollowupResolver::CHOICE, 2, [], false,
+            ],
+            'CRM before rejected VPN remains valid' => [
+                $accounts, 'the CRM one, not VPN', FollowupResolver::CHOICE, 2, [], false,
+            ],
+            'the corrected failing sentence stays unselected' => [
+                $accounts, "not VPN, but CRM isn't it either", FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'number 2 controls remain valid' => [
+                $calendar, 'No. 2', FollowupResolver::CHOICE, 1, [], false,
+            ],
+            'ordinal control remains valid' => [
+                $calendar, 'the second one', FollowupResolver::CHOICE, 1, [], false,
+            ],
+            'bare no 2 remains a rejection' => [
+                $calendar, 'no 2', FollowupResolver::REJECT, null, [1], false,
+            ],
+            'multiple unresolved mentions remain free text' => [
+                $calendar, 'Payroll or Drive', FollowupResolver::FREETEXT, null, [], false,
+            ],
+        ];
+    }
+
+    /** @dataProvider providePolaritySafeResolverCases */
+    public function testResolveMixedPolarityChoicesSafely(
+        array $options,
+        string $reply,
+        string $expectedType,
+        ?int $expectedIndex,
+        array $expectedRejected,
+        bool $expectedUncertain
+    ) {
+        $result = (new FollowupResolver())->resolve($reply, $options);
+        $this->assertSame($expectedType, $result['type'], $reply);
+        $this->assertSame($expectedIndex, $result['index'], $reply);
+        $this->assertSame($expectedRejected, $result['rejected'], $reply);
+        $this->assertSame($expectedUncertain, $result['uncertain'], $reply);
+    }
+
+    public function testMixedNegativeCueUsesFreeTextInsteadOfSelectingCRM()
+    {
+        $reply = "not VPN, but CRM isn't it either";
+        $this->chat->queue(self::CLARIFY_REPLY, 'DECISION: NO_INFORMATION');
+        $service = $this->service();
+        $first = $service->handle('How do I change my password?', [], 'tabAAAAAAAA');
+        $this->assertSame(Outcome::CLARIFY, $first['outcome']);
+        $this->assertCount(1, $this->chat->calls);
+
+        $resolution = (new FollowupResolver())->resolve($reply, $this->session['tabAAAAAAAA']['options']);
+        $this->assertSame(FollowupResolver::FREETEXT, $resolution['type']);
+        $this->assertNull($resolution['index']);
+
+        $second = $service->handle($reply, [], 'tabAAAAAAAA', $first['pendingId']);
+        $this->assertSame(Outcome::NO_INFORMATION, $second['outcome']);
+        $this->assertCount(2, $this->chat->calls, 'free-text follow-up makes one normal model call');
+        $prompt = $this->chat->lastPrompt();
+        $this->assertStringContainsString('Q:How do I change my password? (' . $reply . ')', $prompt);
+        $this->assertStringContainsString('CLARIFY:allowed', $prompt, 'reply follows the free-text clarification path');
+        $this->assertStringNotContainsString('Q:How do I change my password? (CRM)', $prompt);
+        $this->assertStringNotContainsString('CLARIFY:not allowed', $prompt, 'CRM was not sent as a forced choice');
     }
 
     // review finding 5 (service level): a token presented by two overlapping requests is used once

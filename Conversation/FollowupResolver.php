@@ -66,7 +66,13 @@ class FollowupResolver
         // explicit rejections ("not VPN", "not 2", "the CRM one, not VPN") must never select the rejected option
         [$negated, $positive, $remainder] = $this->negations($r, $options);
         if ($negated) {
-            if (count($positive) === 1) return ['type' => self::CHOICE, 'index' => $positive[0]];
+            if (count($positive) === 1) {
+                // A leftover label is not affirmative when its remaining clause rejects or hedges it.
+                if ($this->hasNegativeCue($remainder) || $this->hasUncertaintyCue($remainder)) {
+                    return ['type' => self::FREETEXT];
+                }
+                return ['type' => self::CHOICE, 'index' => $positive[0]];
+            }
             if (!$positive) return ['type' => self::REJECT, 'rejected' => $negated, 'remainder' => $remainder];
             return ['type' => self::FREETEXT];
         }
@@ -82,6 +88,11 @@ class FollowupResolver
                 return ['type' => self::REJECT, 'rejected' => $mentioned, 'uncertain' => true,
                     'remainder' => $this->stripForRemainder($r, $options)];
             }
+        }
+
+        // A unique label inside an explicitly hedged reply is not an affirmative choice.
+        if ($this->hasUncertaintyCue($r) && $this->mentionedIndexes($r, $options)) {
+            return ['type' => self::FREETEXT];
         }
 
         // exact label match first (handles clicked buttons, which send the label)
@@ -164,9 +175,9 @@ class FollowupResolver
                 }
                 $remainder = preg_replace($span, ' ', $remainder);
             }
-            foreach ($labels as $i => $label) {
-                if (!in_array($i, $negated, true) && $this->containsWords($remainder, $label)) $positive[] = $i;
-            }
+            // Reuse longest-first matching so an offered label such as "Desk Token" is not
+            // also counted as the shorter overlapping label "Desk".
+            $positive = array_values(array_diff($this->mentionedIndexes($remainder, $options), $negated));
         }
         // "not 2", "not option 2", "not the second one"
         if (preg_match_all('/(?:^|\s)' . $neg . '\s+(?:(?:option|number|the)\s+)?(\d{1,2}|first|second|third|fourth|fifth|last)(?:\s+(?:one|option))?(?=\s|$)/', $r, $m)) {
@@ -198,6 +209,15 @@ class FollowupResolver
         return (bool)preg_match(
             "/(^|\\s)(not|no|never|nope|neither|nor|wrong|incorrect|isn't|isnt|aren't|arent|wasn't|wasnt|" .
             "don't|dont|doesn't|doesnt|didn't|didnt|won't|can't|cannot|nicht|kein|keine|falsch)(\\s|$)|n't(\\s|$)/u",
+            $r
+        );
+    }
+
+    /** true for hedges that make an otherwise unique option mention non-affirmative */
+    protected function hasUncertaintyCue(string $r): bool
+    {
+        return (bool)preg_match(
+            '/(^|\s)(?:maybe|perhaps|possibly|probably|might|may|could|i think|i guess|i suppose|not sure|unsure|uncertain)(\s|$)/u',
             $r
         );
     }
