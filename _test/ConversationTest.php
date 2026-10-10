@@ -49,6 +49,22 @@ class ConversationTest extends \DokuWikiTest
         );
     }
 
+    protected function serviceWithQueryLog(array &$queries): ConversationService
+    {
+        $retriever = $this->wiki->retriever();
+        return new ConversationService(
+            static function (string $query) use ($retriever, &$queries): array {
+                $queries[] = $query;
+                return $retriever($query);
+            },
+            $this->chat,
+            static fn(array $v) => "CLARIFY:{$v['clarify']}\nQ:{$v['question']}\n{$v['context']}",
+            new PendingStore($this->session, null, fn() => $this->now),
+            [], [], null, null, null, null,
+            $this->wiki->pageFetcher()
+        );
+    }
+
     protected const CLARIFY_REPLY = "DECISION: CLARIFY\nQUESTION: Which account do you want to change the password for?\n" .
         "OPTION: E-Mail | S1, S4\nOPTION: VPN | S2\nOPTION: CRM | S3\nOPTION: E-mail | S4";
 
@@ -592,6 +608,97 @@ class ConversationTest extends \DokuWikiTest
         $this->assertSame([], $fresh, 'consumed token not resurrected');
     }
 
+    public function testSequentialStaleBareChoicePreservesNewerPending()
+    {
+        $queries = [];
+        $service = $this->serviceWithQueryLog($queries);
+        $this->chat->queue(
+            self::CLARIFY_REPLY,
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nOpen CRM settings to change its password."
+        );
+
+        $first = $service->handle('How do I change my password?', [], 'tabAAAAAAAA');
+        $this->assertSame(Outcome::CLARIFY, $first['outcome']);
+        $p1 = $first['pendingId'];
+        $this->assertNotSame('', $p1);
+        $this->assertCount(1, $this->chat->calls);
+        $this->assertCount(1, $queries);
+
+        $second = $service->handle('not VPN', [], 'tabAAAAAAAA', $p1);
+        $this->assertSame(Outcome::CLARIFY, $second['outcome']);
+        $p2 = $second['pendingId'];
+        $this->assertNotSame('', $p2);
+        $this->assertNotSame($p1, $p2);
+        $p2Record = $this->session['tabAAAAAAAA'];
+        $this->assertSame('How do I change my password?', $p2Record['need']);
+        $this->assertSame(['E-Mail', 'CRM'], array_column($p2Record['options'], 'label'));
+        $this->assertSame(2, $p2Record['rounds']);
+        $this->assertSame($this->now, $p2Record['created']);
+        $this->assertCount(1, $this->chat->calls, 'rejecting VPN does not add a model call');
+
+        // A second conversation's pending record must remain isolated from stale requests.
+        $otherStore = new PendingStore($this->session, null, fn() => $this->now);
+        $otherId = $otherStore->put('tabBBBBBBBB', 'Other account question', [
+            ['label' => 'CRM', 'pages' => ['it:crm:password']],
+        ], 1);
+        $this->assertNotSame('', $otherId);
+        $otherRecord = $this->session['tabBBBBBBBB'];
+
+        $assertStale = function (string $reply, string $token) use ($service, $p2Record, $otherRecord, &$queries) {
+            $callsBefore = count($this->chat->calls);
+            $queriesBefore = $queries;
+            $this->wiki->fetched = [];
+
+            $result = $service->handle($reply, [], 'tabAAAAAAAA', $token);
+
+            $this->assertSame(Outcome::NOTICE, $result['outcome'], $reply);
+            $this->assertSame(
+                'That earlier question has expired or belongs to another chat. Please ask your question again.',
+                $result['answer']
+            );
+            $this->assertSame($p2Record, $this->session['tabAAAAAAAA'] ?? null, 'newer pending record is unchanged');
+            $this->assertSame($otherRecord, $this->session['tabBBBBBBBB'] ?? null, 'other conversation is unchanged');
+            $this->assertCount($callsBefore, $this->chat->calls, 'stale bare choice makes no model call');
+            $this->assertSame($queriesBefore, $queries, 'stale bare choice makes no retrieval call');
+            $this->assertSame([], $this->wiki->fetched, 'stale bare choice does not fetch grounded pages');
+        };
+
+        $assertStale('2', $p1);
+        $assertStale('the second one', $p1);
+        do {
+            $unknownId = bin2hex(random_bytes(12));
+        } while ($unknownId === $p1 || $unknownId === $p2);
+        $assertStale('2', $unknownId);
+        $assertStale('2', $p1); // repeated stale replay remains harmless
+
+        $this->wiki->fetched = [];
+        $callsBeforeChoice = count($this->chat->calls);
+        $queriesBeforeChoice = count($queries);
+        $answer = $service->handle('2', [], 'tabAAAAAAAA', $p2);
+        $this->assertSame(Outcome::ANSWER, $answer['outcome']);
+        $this->assertCount($callsBeforeChoice + 1, $this->chat->calls, 'current token makes exactly one model call');
+        $this->assertCount($queriesBeforeChoice + 1, $queries, 'current token makes one answer retrieval');
+        $this->assertSame('How do I change my password? (CRM)', $queries[count($queries) - 1]);
+        $this->assertSame(['it:crm:password'], array_map(fn($c) => $c->getPage(), $answer['sources']));
+        $this->assertSame(['it:crm:password'], $this->wiki->fetched, 'only the selected CRM page is fetched');
+        $this->assertStringContainsString('(CRM)', $this->chat->lastPrompt());
+        $this->assertStringNotContainsString('vpnctl', $this->chat->lastPrompt());
+        $this->assertStringNotContainsString('webmail settings', $this->chat->lastPrompt());
+        $this->assertArrayNotHasKey('tabAAAAAAAA', $this->session, 'current token was consumed');
+        $this->assertSame($otherRecord, $this->session['tabBBBBBBBB']);
+
+        $callsBeforeReplay = count($this->chat->calls);
+        $queriesBeforeReplay = $queries;
+        $this->wiki->fetched = [];
+        $replay = $service->handle('2', [], 'tabAAAAAAAA', $p2);
+        $this->assertSame(Outcome::NOTICE, $replay['outcome'], 'consumed current token cannot answer twice');
+        $this->assertCount($callsBeforeReplay, $this->chat->calls);
+        $this->assertSame($queriesBeforeReplay, $queries);
+        $this->assertSame([], $this->wiki->fetched);
+        $this->assertArrayNotHasKey('tabAAAAAAAA', $this->session);
+        $this->assertSame($otherRecord, $this->session['tabBBBBBBBB']);
+    }
+
     // trace spans cover the whole clarify -> choice flow, correlated, metadata only
     public function testTraceSpansAcrossClarificationAndFollowup()
     {
@@ -674,6 +781,9 @@ class ConversationTest extends \DokuWikiTest
         $this->assertCount($callsBefore, $this->chat->calls, 'no model call, nothing guessed');
         if ($case === 'tab' || $case === 'user') {
             $this->assertArrayHasKey('tabAAAAAAAA', $this->session, 'original state untouched');
+        }
+        if ($case === 'expired') {
+            $this->assertSame([], $this->session, 'genuinely expired pending state is still cleaned up');
         }
     }
 

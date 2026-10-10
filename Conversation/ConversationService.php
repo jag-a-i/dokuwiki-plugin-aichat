@@ -122,13 +122,13 @@ class ConversationService
                 }
                 return $this->handleFollowup($question, $history, $conversation, $pending, $correlation, $redacted);
             }
-            // any stale pending state for this conversation is dropped on a fresh question
-            $this->pending->clear($conversation);
-
-            // a bare choice ("2", "the second one") referring to unknown/expired/foreign state is never guessed
+            // A stale bare choice is not a fresh question: preserve any newer pending token after get() rejects this id.
             if ($pendingId !== '' && FollowupResolver::isBareChoice($question)) {
                 return $this->result(Outcome::NOTICE, $question, $this->lang['expired'], [], $correlation, $redacted);
             }
+
+            // any stale pending state for this conversation is dropped on a fresh question
+            $this->pending->clear($conversation);
 
             $search = $question;
             if ($this->rephraser && $history) {
