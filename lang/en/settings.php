@@ -55,3 +55,20 @@ $lang['preferUIlanguage'] = 'How to work with multilingual wikis? (Requires the 
 $lang['preferUIlanguage_o_0'] = 'Guess language, use all sources';
 $lang['preferUIlanguage_o_1'] = 'Prefer UI language, use all sources';
 $lang['preferUIlanguage_o_2'] = 'Prefer UI language, same language sources only';
+
+$lang['feedback'] = 'Show Helpful / Not helpful buttons on answers. Votes are stored locally with the response metadata.';
+$lang['diagnostics'] = 'Keep local metadata-only diagnostics per response (outcome, timings, counts, sanitized error category). Never stores questions, answers, page content, IP addresses or user names.';
+$lang['diagnostics_retention'] = 'Days to keep local response records (diagnostics and feedback). Older records are deleted automatically.';
+$lang['telemetry'] = 'Trace export backend. "off" sends nothing.';
+$lang['telemetry_o_off'] = 'off';
+$lang['telemetry_o_langfuse'] = 'Langfuse (OpenTelemetry endpoint)';
+$lang['telemetry_o_otlp'] = 'Generic OTLP/HTTP JSON collector';
+$lang['telemetry_endpoint'] = 'Langfuse base URL (e.g. https://langfuse.example.internal) or full OTLP traces URL (…/v1/traces).';
+$lang['telemetry_langfuse_public'] = 'Langfuse public key (pk-lf-…)';
+$lang['telemetry_langfuse_secret'] = 'Langfuse secret key (sk-lf-…)';
+$lang['telemetry_otlp_authorization'] = 'Optional Authorization header value for the generic OTLP collector.';
+$lang['telemetry_capture'] = 'PRIVACY: additionally export content (secret-redacted on a best-effort basis). Leave all unchecked for metadata only.';
+$lang['telemetry_timeout'] = 'Export timeout per attempt in seconds.';
+$lang['telemetry_retries'] = 'Export retries after a failed attempt.';
+$lang['telemetry_spool_max'] = 'Maximum number of undelivered traces kept for a later retry (0 = drop).';
+$lang['telemetry_spool_days'] = 'Days to keep undelivered traces before deleting them.';

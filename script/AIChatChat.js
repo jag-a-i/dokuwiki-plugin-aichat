@@ -6,6 +6,8 @@ class AIChatChat extends HTMLElement {
     #progress = null;
     #pagecontext = null;
     #history = [];
+    #conversation = '';
+    #pending = '';
 
     constructor() {
         super();
@@ -207,38 +209,94 @@ class AIChatChat extends HTMLElement {
             .output > div.human pre {
                 scrollbar-color: var(--color-link) var(--color-human);
             }
+            .ai .warning {
+                font-weight: bold;
+            }
+            .ai .options {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.25em;
+                margin-top: 0.5em;
+            }
+            .ai .options button {
+                cursor: pointer;
+                padding: 0.25em 0.75em;
+            }
+            .ai .feedback {
+                display: flex;
+                flex-wrap: wrap;
+                align-items: center;
+                gap: 0.25em;
+                margin-top: 0.5em;
+                font-size: 0.9em;
+            }
+            .ai .feedback button[aria-pressed="true"] {
+                font-weight: bold;
+                outline: 2px solid var(--color-link);
+            }
+            .ai .feedback .categories {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.25em;
+            }
+            .ai .feedback .categories[hidden] {
+                display: none;
+            }
+            .ai .feedback.error .status {
+                color: #a00;
+            }
         `;
         return style;
     }
 
     /**
-     * Save history to session storage
+     * Save history and conversation state to session storage (per browser tab)
      */
     saveHistory() {
         sessionStorage.setItem('ai-chat-history', JSON.stringify(this.#history));
+        sessionStorage.setItem('ai-chat-conversation', this.#conversation);
+        sessionStorage.setItem('ai-chat-pending', this.#pending);
     }
 
     /**
      * Load the history from session storage and display it
+     *
+     * Rows are [question, answerHtml, sources] (legacy) or [question, answerHtml, sources, meta] (meta.v >= 1).
+     * Answers already contain their footer (new rows) or never had one (legacy rows); nothing is appended.
+     * Clarification options are only shown for the last row and only while it is still pending.
      */
     restoreHistory() {
+        this.#conversation = sessionStorage.getItem('ai-chat-conversation') || '';
+        this.#pending = sessionStorage.getItem('ai-chat-pending') || '';
         const history = sessionStorage.getItem('ai-chat-history');
         if (history) {
-            this.#history = JSON.parse(history);
-            this.#history.forEach(row => {
+            try {
+                this.#history = JSON.parse(history);
+            } catch (e) {
+                this.#history = [];
+            }
+            if (!Array.isArray(this.#history)) this.#history = [];
+            this.#history.forEach((row, idx) => {
+                const meta = (row[3] && typeof row[3] === 'object') ? row[3] : null;
+                const isLast = idx === this.#history.length - 1;
                 this.displayMessage(row[0]);
-                this.displayMessage(row[1], row[2]);
+                this.displayMessage(row[1], row[2] || [], meta, isLast && this.#pending !== '');
             });
         }
     }
 
     /**
-     * Clear the history and reset the chat
+     * Clear the history and reset the chat (also forgets the conversation and any pending clarification)
      */
     deleteHistory() {
         sessionStorage.removeItem('ai-chat-history');
+        sessionStorage.removeItem('ai-chat-conversation');
+        sessionStorage.removeItem('ai-chat-pending');
         this.#history = [];
-        this.connectedCallback(); // re-initialize
+        this.#conversation = '';
+        this.#pending = '';
+        this.#output.innerHTML = '';
+        this.connectedCallback();
     }
 
     /**
@@ -251,15 +309,25 @@ class AIChatChat extends HTMLElement {
     }
 
     /**
-     * Submit the given question to the server
+     * Submit the form
      *
      * @param event
      * @returns {Promise<void>}
      */
     async onSubmit(event) {
         event.preventDefault();
-        const message = this.#input.value;
+        await this.ask(this.#input.value);
+    }
+
+    /**
+     * Send a message (typed or a clicked clarification option) and display the reply
+     *
+     * @param {string} message
+     * @returns {Promise<void>}
+     */
+    async ask(message) {
         if (!message) return;
+        this.removeOptions();
 
         // show original question for now
         const p = this.displayMessage(message);
@@ -268,11 +336,16 @@ class AIChatChat extends HTMLElement {
         this.startProgress();
         try {
             const response = await this.sendMessage(message, this.getPageContext());
-            this.#history.push([response.question, response.answer, response.sources]);
+            const meta = (response.meta && typeof response.meta === 'object') ? response.meta : null;
+            if (meta) {
+                if (meta.conversationId) this.#conversation = meta.conversationId;
+                this.#pending = meta.pendingId || '';
+            }
+            this.#history.push([response.question, response.answer, response.sources, meta]);
             this.saveHistory();
             p.textContent = response.question; // replace original question with interpretation
             p.title = message; // show original question on hover
-            this.displayMessage(response.answer, response.sources); // display the answer
+            this.displayMessage(response.answer, response.sources, meta, true); // display the answer
         } catch (e) {
             console.error(e);
             this.displayMessage(LANG.plugins.aichat.error, {});
@@ -281,6 +354,106 @@ class AIChatChat extends HTMLElement {
         this.stopProgress();
         this.#input.focus();
         p.scrollIntoView();
+    }
+
+    /**
+     * Build the Helpful / Not helpful control for an answer
+     *
+     * @param {object} meta response metadata (responseId, feedback state)
+     * @returns {HTMLDivElement}
+     */
+    feedbackControl(meta) {
+        const L = (key, fallback) => (window.LANG && LANG.plugins && LANG.plugins.aichat && LANG.plugins.aichat[key]) || fallback;
+        const box = document.createElement('div');
+        box.classList.add('feedback');
+        box.setAttribute('role', 'group');
+        box.setAttribute('aria-label', L('feedback_question', 'Was this answer helpful?'));
+
+        const status = document.createElement('span');
+        status.classList.add('status');
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+
+        const cats = document.createElement('div');
+        cats.classList.add('categories');
+        cats.setAttribute('role', 'group');
+        cats.setAttribute('aria-label', L('feedback_reason', 'What was wrong? (optional)'));
+        cats.hidden = true;
+
+        const state = meta.vote || {vote: '', category: ''};
+        const voteButtons = {};
+        const catButtons = {};
+        const render = () => {
+            Object.entries(voteButtons).forEach(([v, b]) => b.setAttribute('aria-pressed', String(state.vote === v)));
+            Object.entries(catButtons).forEach(([c, b]) => b.setAttribute('aria-pressed', String(state.category === c)));
+            cats.hidden = state.vote !== 'not_helpful';
+        };
+        const save = async (vote, category) => {
+            status.textContent = '';
+            try {
+                const ok = await this.sendFeedback(meta.responseId, vote, category);
+                if (!ok) throw new Error('not saved');
+                state.vote = vote;
+                state.category = category;
+                meta.vote = {vote, category};
+                this.saveHistory(); // meta objects are shared with the history rows
+                status.textContent = L('feedback_saved', 'Thanks, your feedback was saved.');
+                box.classList.remove('error');
+            } catch (e) {
+                status.textContent = L('feedback_error', 'Sorry, your feedback could not be saved.');
+                box.classList.add('error');
+            }
+            render();
+        };
+
+        [['helpful', L('feedback_helpful', 'Helpful')], ['not_helpful', L('feedback_not_helpful', 'Not helpful')]]
+            .forEach(([vote, label]) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.classList.add('vote', vote);
+                b.textContent = label;
+                b.addEventListener('click', () => save(vote, ''));
+                voteButtons[vote] = b;
+                box.appendChild(b);
+            });
+        ['wrong_answer', 'missing_information', 'wrong_source', 'unclear'].forEach((cat) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.classList.add('category', cat);
+            b.textContent = L('feedback_cat_' + cat, cat.replace('_', ' '));
+            b.addEventListener('click', () => save('not_helpful', state.category === cat ? '' : cat));
+            catButtons[cat] = b;
+            cats.appendChild(b);
+        });
+        box.appendChild(cats);
+        box.appendChild(status);
+        render();
+        return box;
+    }
+
+    /**
+     * Send a feedback vote
+     *
+     * @returns {Promise<boolean>} true if the server saved it
+     */
+    async sendFeedback(responseId, vote, category) {
+        const formData = new FormData();
+        formData.append('responseId', responseId);
+        formData.append('vote', vote);
+        formData.append('category', category || '');
+        formData.append('sectok', (window.JSINFO && JSINFO.plugin_aichat && JSINFO.plugin_aichat.sectok) || '');
+        const url = (this.getAttribute('url') || '/').replace(/([?&]call=)aichat(?=&|$)/, '$1aichat_feedback');
+        const response = await fetch(url, {method: 'POST', body: formData});
+        if (!response.ok) return false;
+        const data = await response.json();
+        return data.ok === true;
+    }
+
+    /**
+     * Remove any clickable clarification options (they are only valid for the latest question)
+     */
+    removeOptions() {
+        this.#root.querySelectorAll('.options').forEach(el => el.remove());
     }
 
     /**
@@ -322,17 +495,28 @@ class AIChatChat extends HTMLElement {
      * @param {object|null} sources Dict of sources {url:title, ...}  if given this is assumed to be an AI message
      * @returns {HTMLParagraphElement} Reference to the newly added message
      */
-    displayMessage(message, sources = null) {
+    displayMessage(message, sources = null, meta = null, interactive = false) {
         const div = document.createElement('div');
         if(sources !== null) {
             div.classList.add('ai');
-            div.innerHTML = message; // we get HTML for AI messages
+            if (meta && meta.warning) {
+                const warn = document.createElement('p');
+                warn.classList.add('warning');
+                warn.setAttribute('role', 'alert');
+                warn.textContent = meta.warning;
+                div.appendChild(warn);
+            }
+            const body = document.createElement('div');
+            body.innerHTML = message; // we get sanitized HTML for AI messages
+            div.appendChild(body);
         } else {
             div.classList.add('user');
             div.textContent = message;
         }
 
-        if (sources !== null && sources.length > 0) {
+        // sources are only shown for real answers (legacy rows without meta are answers)
+        const outcome = meta ? meta.outcome : 'ANSWER';
+        if (sources !== null && sources.length > 0 && outcome === 'ANSWER') {
             const ul = document.createElement('ul');
             sources.forEach((source) => {
                 const li = document.createElement('li');
@@ -344,6 +528,25 @@ class AIChatChat extends HTMLElement {
                 ul.appendChild(li);
             });
             div.appendChild(ul);
+        }
+
+        if (meta && outcome === 'ANSWER' && meta.feedback && meta.responseId) {
+            div.appendChild(this.feedbackControl(meta));
+        }
+
+        if (interactive && meta && outcome === 'CLARIFY' && Array.isArray(meta.options) && meta.options.length) {
+            const opts = document.createElement('div');
+            opts.classList.add('options');
+            opts.setAttribute('role', 'group');
+            meta.options.forEach((label, i) => {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.textContent = `${i + 1}. ${label}`;
+                btn.setAttribute('aria-label', `Option ${i + 1}: ${label}`);
+                btn.addEventListener('click', () => this.ask(String(label)));
+                opts.appendChild(btn);
+            });
+            div.appendChild(opts);
         }
 
         this.#output.appendChild(div);
@@ -360,8 +563,12 @@ class AIChatChat extends HTMLElement {
     async sendMessage(message, pageContext = '') {
         const formData = new FormData();
         formData.append('question', message);
-        formData.append('history', JSON.stringify(this.#history));
+        // only the last few [question, answer] pairs are needed; the server treats them as untrusted context
+        formData.append('history', JSON.stringify(this.#history.slice(-6).map(row => [row[0], row[1]])));
         formData.append('pagecontext', pageContext);
+        formData.append('conversation', this.#conversation);
+        formData.append('pending', this.#pending);
+        formData.append('sectok', (window.JSINFO && JSINFO.plugin_aichat && JSINFO.plugin_aichat.sectok) || '');
 
         const response = await fetch(this.getAttribute('url') || '/', {
             method: 'POST',

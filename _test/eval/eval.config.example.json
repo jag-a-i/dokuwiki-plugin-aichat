@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to eval.config.json OUTSIDE the repository if it ever contains anything sensitive. Model names are placeholders: use the exact identifiers configured on your llama-swap endpoint. The endpoint URL and API key are taken from the wiki's existing aichat configuration (generic_apiurl/generic_apikey) and are never stored here.",
+  "repeat": 3,
+  "models": [
+    {"label": "current (Gemma 4B)", "chatmodel": "Generic REPLACE-WITH-GEMMA-MODEL-ID"},
+    {"label": "candidate (larger local model)", "chatmodel": "Generic REPLACE-WITH-CANDIDATE-MODEL-ID"}
+  ]
+}

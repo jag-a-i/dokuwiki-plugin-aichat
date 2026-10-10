@@ -1,0 +1,34 @@
+<?php
+// Subprocess: exports one trace through the REAL default transport (DokuHTTPClient) and prints the result.
+// usage: php [-d openssl.cafile=...] redirect_client.php BACKEND URL [DEBUGMODE]
+// DEBUGMODE: request (?httpdebug=1) | referer (Referer contains httpdebug) - with $conf['allowdebug'] = 1
+// Prints any captured output of the transport first, then a JSON result line.
+if (!defined('DOKU_INC')) define('DOKU_INC', realpath(__DIR__ . '/../../../../../') . '/');
+define('NOSESSION', true);
+require_once DOKU_INC . 'inc/init.php';
+use dokuwiki\plugin\aichat\Telemetry\ExporterFactory;
+use dokuwiki\plugin\aichat\Telemetry\TraceRecorder;
+[$backend, $url] = [$argv[1], $argv[2]];
+$debugMode = $argv[3] ?? '';
+if ($debugMode !== '') {
+    global $conf;
+    $conf['allowdebug'] = 1;
+    if ($debugMode === 'request') { $_REQUEST['httpdebug'] = '1'; $_GET['httpdebug'] = '1'; }
+    if ($debugMode === 'referer') { $_SERVER['HTTP_REFERER'] = 'https://wiki.example.invalid/doku.php?id=start&httpdebug=1'; }
+    // sanity: DokuWiki's own client really would debug in this environment
+    $probe = new \dokuwiki\HTTP\DokuHTTPClient();
+    $debugActiveForDokuClient = $probe->debug;
+}
+$pconf = ['telemetry' => $backend, 'telemetry_endpoint' => $url, 'telemetry_timeout' => 2, 'telemetry_retries' => 2,
+    'telemetry_langfuse_public' => 'pk-lf-placeholder', 'telemetry_langfuse_secret' => 'sk-lf-REDIRECT-CANARY',
+    'telemetry_otlp_authorization' => 'Bearer OTLP-REDIRECT-CANARY'];
+$e = ExporterFactory::create($pconf, ExporterFactory::dokuHttp());
+$t = new TraceRecorder();
+$s = $t->start('retrieval'); $t->end($s, ['chunks' => 1]);
+$t->finish(['outcome' => 'ANSWER', 'correlation_id' => 'BODY-CANARY-0123']);
+$allowdebugAtExport = !empty($GLOBALS['conf']['allowdebug']);
+ob_start();
+$ok = $e->export($t->toArray() + ['sessionId' => 'c1', 'release' => 'x']);
+$captured = ob_get_clean();
+echo json_encode(['ok' => $ok, 'last' => $e->last, 'status' => $e->lastStatus, 'captured' => $captured,
+    'debugActiveForDokuClient' => $debugActiveForDokuClient ?? null, 'allowdebugAtExport' => $allowdebugAtExport]);
