@@ -64,11 +64,12 @@ class FollowupResolver
         }
 
         // explicit rejections ("not VPN", "not 2", "the CRM one, not VPN") must never select the rejected option
-        [$negated, $positive, $remainder] = $this->negations($r, $options);
+        [$negated, $positive, $remainder, $polarityRemainder] = $this->negations($r, $options);
         if ($negated) {
             if (count($positive) === 1) {
-                // A leftover label is not affirmative when its remaining clause rejects or hedges it.
-                if ($this->hasNegativeCue($remainder) || $this->hasUncertaintyCue($remainder)) {
+                // Keep semantic cues separate from the cleaned search remainder: simplification can
+                // remove words such as "no" and "i" that are part of negative/hedging expressions.
+                if ($this->hasNegativeCue($polarityRemainder) || $this->hasUncertaintyCue($polarityRemainder)) {
                     return ['type' => self::FREETEXT];
                 }
                 return ['type' => self::CHOICE, 'index' => $positive[0]];
@@ -135,7 +136,7 @@ class FollowupResolver
     /**
      * Find option references preceded by a negation.
      *
-     * @return array [int[] $negatedIndexes, int[] $positiveIndexes, string $remainder]
+     * @return array [int[] $negatedIndexes, int[] $positiveIndexes, string $remainder, string $polarityRemainder]
      */
     protected function negations(string $r, array $options): array
     {
@@ -188,9 +189,10 @@ class FollowupResolver
             $remainder = preg_replace('/(?:^|\s)' . $neg . '\s+(?:(?:option|number|the)\s+)?(?:\d{1,2}|first|second|third|fourth|fifth|last)(?:\s+(?:one|option))?(?=\s|$)/', ' ', $remainder);
         }
         $positive = array_values(array_diff($positive, $negated));
-        $words = array_filter(explode(' ', trim(preg_replace('/\s+/', ' ', $remainder))),
+        $polarityRemainder = trim(preg_replace('/\s+/', ' ', $remainder));
+        $words = array_filter(explode(' ', $polarityRemainder),
             static fn($w) => $w !== '' && !preg_match(self::FILLER, $w));
-        return [$negated, $positive, implode(' ', $words)];
+        return [$negated, $positive, implode(' ', $words), $polarityRemainder];
     }
 
     /** true for replies that only make sense as a reference to a pending option list */

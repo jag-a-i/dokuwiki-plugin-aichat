@@ -414,6 +414,39 @@ class ConversationTest extends \DokuWikiTest
         $accounts = $options(['E-Mail', 'VPN', 'CRM']);
 
         return [
+            'negative no-good cue survives another rejection' => [
+                $calendar, 'not Payroll, but Drive is no good', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'direct no-good mention is not a choice' => [
+                $calendar, 'Drive is no good', FollowupResolver::REJECT, null, [2], true,
+            ],
+            'think hedge survives another rejection' => [
+                $calendar, 'not Payroll, but I think Drive', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'direct think hedge is not a choice' => [
+                $calendar, 'I think Drive', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'guess hedge survives another rejection' => [
+                $calendar, 'not Payroll, but I guess Drive', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'suppose hedge survives another rejection' => [
+                $calendar, 'not Payroll, but I suppose Drive', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'overlapping label keeps no-good cue in reordered clause' => [
+                $desk, 'Desk Token is no good, not Portal', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'overlapping label keeps no-good cue after rejection' => [
+                $desk, 'not Portal, but Desk Token is no good', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'overlapping label keeps multiword hedge after rejection' => [
+                $desk, 'not Portal, but I think Desk Token', FollowupResolver::FREETEXT, null, [], false,
+            ],
+            'drive correction remains positive' => [
+                $calendar, 'the Drive one, not Payroll', FollowupResolver::CHOICE, 2, [], false,
+            ],
+            'direct Drive button remains positive' => [
+                $calendar, 'Drive', FollowupResolver::CHOICE, 2, [], false,
+            ],
             'prefix rejection and trailing negation' => [
                 $calendar, 'not Payroll, but Drive is not it', FollowupResolver::FREETEXT, null, [], false,
             ],
@@ -484,6 +517,29 @@ class ConversationTest extends \DokuWikiTest
     public function testMixedNegativeCueUsesFreeTextInsteadOfSelectingCRM()
     {
         $reply = "not VPN, but CRM isn't it either";
+        $this->chat->queue(self::CLARIFY_REPLY, 'DECISION: NO_INFORMATION');
+        $service = $this->service();
+        $first = $service->handle('How do I change my password?', [], 'tabAAAAAAAA');
+        $this->assertSame(Outcome::CLARIFY, $first['outcome']);
+        $this->assertCount(1, $this->chat->calls);
+
+        $resolution = (new FollowupResolver())->resolve($reply, $this->session['tabAAAAAAAA']['options']);
+        $this->assertSame(FollowupResolver::FREETEXT, $resolution['type']);
+        $this->assertNull($resolution['index']);
+
+        $second = $service->handle($reply, [], 'tabAAAAAAAA', $first['pendingId']);
+        $this->assertSame(Outcome::NO_INFORMATION, $second['outcome']);
+        $this->assertCount(2, $this->chat->calls, 'free-text follow-up makes one normal model call');
+        $prompt = $this->chat->lastPrompt();
+        $this->assertStringContainsString('Q:How do I change my password? (' . $reply . ')', $prompt);
+        $this->assertStringContainsString('CLARIFY:allowed', $prompt, 'reply follows the free-text clarification path');
+        $this->assertStringNotContainsString('Q:How do I change my password? (CRM)', $prompt);
+        $this->assertStringNotContainsString('CLARIFY:not allowed', $prompt, 'CRM was not sent as a forced choice');
+    }
+
+    public function testPreservedNegativeCueUsesFreeTextInsteadOfSelectingCRM()
+    {
+        $reply = 'not VPN, but CRM is no good';
         $this->chat->queue(self::CLARIFY_REPLY, 'DECISION: NO_INFORMATION');
         $service = $this->service();
         $first = $service->handle('How do I change my password?', [], 'tabAAAAAAAA');
