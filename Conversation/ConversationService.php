@@ -130,14 +130,16 @@ class ConversationService
             // any stale pending state for this conversation is dropped on a fresh question
             $this->pending->clear($conversation);
 
-            $search = $question;
+            $need = $question;
             if ($this->rephraser && $history) {
                 $span = $this->span('rephrase');
-                $search = ($this->rephraser)($question, $history) ?: $question;
+                $need = ($this->rephraser)($question, $history) ?: $question;
                 $this->end($span);
             }
+            [$need, $needRedacted] = $this->redactor->redact($need);
+            $redacted = $redacted || $needRedacted;
             return $this->answerOrClarify(
-                $question, $search, $history, $conversation, $correlation, $redacted,
+                $question, $need, $history, $conversation, $correlation, $redacted,
                 $this->conf['clarify'] && !$this->isExplicitMulti($question), 0, null
             );
         } catch (\Throwable $e) {
@@ -297,11 +299,11 @@ class ConversationService
      *                                   because retrieval runs again with the current user's ACL
      */
     protected function answerOrClarify(
-        string $question, string $search, array $history, string $conversation, string $correlation,
+        string $question, string $need, array $history, string $conversation, string $correlation,
         bool $redacted, bool $allowClarify, int $rounds, ?array $preferPages, array $excludePages = []
     ): array {
         $span = $this->span('retrieval', ['acl_filtered' => true]);
-        $chunks = array_values(($this->retriever)($search));
+        $chunks = array_values(($this->retriever)($need));
         if ($excludePages) {
             $ex = array_flip($excludePages);
             $chunks = array_values(array_filter($chunks, static fn(Chunk $c) => !isset($ex[$c->getPage()])));
@@ -350,7 +352,7 @@ class ConversationService
         }
         $prompt = ($this->promptBuilder)([
             'context' => implode("\n\n", $context),
-            'question' => $question,
+            'question' => $need,
             'clarify' => $allowClarify ? 'allowed' : 'not allowed',
         ]);
         $messages = $this->historyMessages($history);
@@ -372,13 +374,13 @@ class ConversationService
                 if (count($options) >= 2) {
                     $q = $this->cleanQuestion($decision['question']) ?: $this->lang['clarify_default'];
                     $this->end($span, ['result' => 'clarify', 'options' => count($options)]);
-                    return $this->clarifyResult($question, $conversation, $question, $options, $q, $rounds + 1, $correlation, $redacted);
+                    return $this->clarifyResult($question, $conversation, $need, $options, $q, $rounds + 1, $correlation, $redacted);
                 }
                 if (!$decision['options'] && $this->cleanQuestion($decision['question'])) {
                     // no menu possible: generic targeted question, no invented choices
                     $this->end($span, ['result' => 'clarify_generic']);
                     return $this->clarifyResult(
-                        $question, $conversation, $question, [], $this->cleanQuestion($decision['question']),
+                        $question, $conversation, $need, [], $this->cleanQuestion($decision['question']),
                         $rounds + 1, $correlation, $redacted
                     );
                 }
@@ -387,7 +389,7 @@ class ConversationService
             $this->end($span, ['result' => 'forced_answer']);
             $prompt = ($this->promptBuilder)([
                 'context' => implode("\n\n", $context),
-                'question' => $question,
+                'question' => $need,
                 'clarify' => 'not allowed',
             ]);
             $messages[count($messages) - 1]['content'] = $prompt;

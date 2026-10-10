@@ -49,6 +49,37 @@ class ConversationTest extends \DokuWikiTest
         );
     }
 
+    protected const RESOLVED_PASSWORD_NEED = 'How do I reset my password without knowing my old password?';
+    protected const PASSWORD_HISTORY = [['I forgot my old password', 'Which account is this about?']];
+
+    protected function serviceWithResolvedNeed(
+        array &$queries,
+        ?callable $rephraser,
+        int $chatHistoryRows = 1,
+        bool $clarify = true,
+        ?callable $retriever = null,
+        ?callable $pageFetcher = null
+    ): ConversationService {
+        $baseRetriever = $retriever ?? $this->wiki->retriever();
+        if ($retriever === null) $pageFetcher = $this->wiki->pageFetcher();
+        return new ConversationService(
+            static function (string $query) use ($baseRetriever, &$queries): array {
+                $queries[] = $query;
+                return $baseRetriever($query);
+            },
+            $this->chat,
+            static fn(array $v) => "CLARIFY:{$v['clarify']}\nQ:{$v['question']}\n{$v['context']}",
+            new PendingStore($this->session, null, fn() => $this->now),
+            ['maxHistoryRows' => 1, 'chatHistoryRows' => $chatHistoryRows, 'clarify' => $clarify],
+            [],
+            $rephraser,
+            null,
+            null,
+            null,
+            $pageFetcher
+        );
+    }
+
     protected function serviceWithQueryLog(array &$queries): ConversationService
     {
         $retriever = $this->wiki->retriever();
@@ -896,5 +927,285 @@ class ConversationTest extends \DokuWikiTest
         $pages = array_map(fn($c) => $c->getPage(), $r['sources']);
         $this->assertNotContains('it:hr:password', $pages);
         $this->assertStringNotContainsString('S99', $r['answer']);
+    }
+
+    public function testResolvedNeedReachesGenerationWithoutReplayingHistory(): void
+    {
+        $queries = [];
+        $rephraseCalls = 0;
+        $service = $this->serviceWithResolvedNeed(
+            $queries,
+            static function (string $question, array $history) use (&$rephraseCalls): string {
+                $rephraseCalls++;
+                return self::RESOLVED_PASSWORD_NEED;
+            },
+            0
+        );
+        $this->chat->queue("DECISION: ANSWER\nUSED: S1\nANSWER:\nSynthetic answer.");
+
+        $result = $service->handle('How can I do that?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $prompt = $this->chat->lastPrompt();
+
+        $this->assertSame([self::RESOLVED_PASSWORD_NEED], $queries);
+        $this->assertSame('How can I do that?', $result['question'], 'the public first-turn question stays original');
+        $this->assertSame(
+            ['outcome', 'question', 'answer', 'sources', 'options', 'pendingId', 'conversationId', 'responseId',
+                'correlationId', 'redacted', 'warning'],
+            array_keys($result),
+            'public response shape is unchanged'
+        );
+        $this->assertCount(1, $this->chat->calls);
+        $this->assertCount(1, $this->chat->calls[0], 'chatHistoryRows=0 does not replay history');
+        $this->assertStringContainsString('Q:' . self::RESOLVED_PASSWORD_NEED, $prompt);
+        $this->assertStringNotContainsString('Q:How can I do that?', $prompt);
+        $this->assertSame(1, $rephraseCalls);
+    }
+
+    public function testResolvedNeedIsStoredForGroundedAndGenericClarification(): void
+    {
+        $queries = [];
+        $rephraser = static fn(string $question, array $history): string => self::RESOLVED_PASSWORD_NEED;
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: CLARIFY\nQUESTION: Which account?");
+        $menuService = $this->serviceWithResolvedNeed($queries, $rephraser, 1);
+
+        $menu = $menuService->handle('How can I do that?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $this->assertSame(Outcome::CLARIFY, $menu['outcome']);
+        $this->assertSame('How can I do that?', $menu['question']);
+        $this->assertSame(self::RESOLVED_PASSWORD_NEED, $this->session['tabAAAAAAAA']['need']);
+        $this->assertStringContainsString('Q:' . self::RESOLVED_PASSWORD_NEED, $this->chat->lastPrompt());
+
+        $this->session = [];
+        $queries = [];
+        $genericService = $this->serviceWithResolvedNeed($queries, $rephraser, 1);
+        $generic = $genericService->handle('How can I do that?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+
+        $this->assertSame(Outcome::CLARIFY, $generic['outcome']);
+        $this->assertSame([], $generic['options']);
+        $this->assertSame(self::RESOLVED_PASSWORD_NEED, $this->session['tabAAAAAAAA']['need']);
+        $this->assertStringContainsString('Q:' . self::RESOLVED_PASSWORD_NEED, $this->chat->lastPrompt());
+    }
+
+    public function testResolvedNeedIsUsedForForcedAnswerRetry(): void
+    {
+        $queries = [];
+        $rephraser = static fn(string $question, array $history): string => self::RESOLVED_PASSWORD_NEED;
+        $service = $this->serviceWithResolvedNeed($queries, $rephraser, 0, false);
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nSynthetic answer.");
+
+        $result = $service->handle('How can I do that?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+
+        $this->assertSame(Outcome::ANSWER, $result['outcome']);
+        $this->assertSame('How can I do that?', $result['question']);
+        $this->assertCount(2, $this->chat->calls, 'the first clarification decision is followed by one forced answer');
+        foreach ($this->chat->calls as $messages) {
+            $this->assertCount(1, $messages, 'history remains disabled');
+            $this->assertStringContainsString('Q:' . self::RESOLVED_PASSWORD_NEED, $messages[0]['content']);
+            $this->assertStringContainsString('CLARIFY:not allowed', $messages[0]['content']);
+        }
+    }
+
+    public function testResolvedNeedSurvivesChoiceWithEmptyIncomingHistory(): void
+    {
+        $queries = [];
+        $rephraseCalls = 0;
+        $rephraser = static function (string $question, array $history) use (&$rephraseCalls): string {
+            $rephraseCalls++;
+            return self::RESOLVED_PASSWORD_NEED;
+        };
+        $this->chat->queue(self::CLARIFY_REPLY, "DECISION: ANSWER\nUSED: S1\nANSWER:\nVPN answer.");
+        $service = $this->serviceWithResolvedNeed($queries, $rephraser, 1);
+
+        $first = $service->handle('How can I do that?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $choice = $service->handle('2', [], 'tabAAAAAAAA', $first['pendingId']);
+
+        $this->assertSame(Outcome::ANSWER, $choice['outcome']);
+        $this->assertSame(
+            [self::RESOLVED_PASSWORD_NEED, self::RESOLVED_PASSWORD_NEED . ' (VPN)'],
+            $queries
+        );
+        $this->assertSame(1, $rephraseCalls, 'a choice reuses stored need without another rephrase');
+        $this->assertCount(1, $this->chat->calls[1], 'the choice caller provides no history');
+        $this->assertStringContainsString('Q:' . self::RESOLVED_PASSWORD_NEED . ' (VPN)', $this->chat->calls[1][0]['content']);
+        $this->assertSame(['it:vpn:password'], array_map(
+            static fn($chunk) => $chunk->getPage(),
+            $choice['sources']
+        ));
+    }
+
+    public function testDistinctResolvedConstraintSurvivesChoiceAndUsesSelectedEvidence(): void
+    {
+        $resolvedNeed = 'Export records without administrator access.';
+        $chunks = [
+            new \dokuwiki\plugin\aichat\Chunk('it:finance:export', 1, 'Finance Ledger export steps for regular staff.', [], 'en', 1, 2),
+            new \dokuwiki\plugin\aichat\Chunk('it:records:export', 2, 'Legacy Records Vault export procedure for regular staff.', [], 'en', 1, 1),
+        ];
+        $retriever = static fn(string $query): array => $chunks;
+        $queries = [];
+        $rephraseCalls = 0;
+        $rephraser = static function (string $question, array $history) use (&$rephraseCalls, $resolvedNeed): string {
+            $rephraseCalls++;
+            return $resolvedNeed;
+        };
+        $menuReply = "DECISION: CLARIFY\nQUESTION: Which export destination?\nOPTION: Finance Ledger | S1\nOPTION: Legacy Records Vault | S2";
+        $this->chat->queue(
+            $menuReply,
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse the Legacy Records Vault export page."
+        );
+        $service = $this->serviceWithResolvedNeed($queries, $rephraser, 1, true, $retriever);
+
+        $first = $service->handle('Can I export it without an administrator?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $this->assertSame($resolvedNeed, $this->session['tabAAAAAAAA']['need']);
+        $choice = $service->handle('Legacy Records Vault', [], 'tabAAAAAAAA', $first['pendingId']);
+
+
+        $this->assertSame([$resolvedNeed, $resolvedNeed . ' (Legacy Records Vault)'], $queries);
+        $this->assertSame(1, $rephraseCalls);
+        $this->assertCount(1, $this->chat->calls[1], 'the generalized choice caller provides no history');
+        $this->assertStringContainsString('Q:' . $resolvedNeed . ' (Legacy Records Vault)', $this->chat->calls[1][0]['content']);
+        $this->assertSame(['it:records:export'], array_map(
+            static fn($chunk) => $chunk->getPage(),
+            $choice['sources']
+        ));
+    }
+
+    public function testResolvedNeedSurvivesRejectedOptionFreeTextComposition(): void
+    {
+        $queries = [];
+        $rephraser = static fn(string $question, array $history): string => self::RESOLVED_PASSWORD_NEED;
+        $this->chat->queue(self::CLARIFY_REPLY, 'DECISION: NO_INFORMATION');
+        $service = $this->serviceWithResolvedNeed($queries, $rephraser, 0);
+
+        $first = $service->handle('How can I do that?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $reply = 'not VPN, my personal account';
+        $result = $service->handle($reply, [], 'tabAAAAAAAA', $first['pendingId']);
+
+        $this->assertSame(Outcome::NO_INFORMATION, $result['outcome']);
+        $this->assertSame([
+            self::RESOLVED_PASSWORD_NEED,
+            self::RESOLVED_PASSWORD_NEED . ' (my personal account)',
+        ], $queries);
+        $this->assertStringContainsString('Q:' . self::RESOLVED_PASSWORD_NEED . ' (my personal account)', $this->chat->lastPrompt());
+        $this->assertStringNotContainsString('vpnctl', $this->chat->lastPrompt(), 'rejected option evidence stays excluded');
+    }
+
+    public function testStandaloneAndEmptyRephraseFallbackToRedactedOriginalQuestion(): void
+    {
+        $question = 'How do I change my VPN password?';
+        $this->chat->queue(
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nFirst answer.",
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nSecond answer.",
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nThird answer."
+        );
+
+        $queries = [];
+        $noRephraser = $this->serviceWithResolvedNeed($queries, null, 0);
+        $noRephraseResult = $noRephraser->handle($question, self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $this->assertSame([$question], $queries);
+        $this->assertStringContainsString('Q:' . $question, $this->chat->lastPrompt());
+        $this->assertSame($question, $noRephraseResult['question']);
+
+        $this->session = [];
+        $queries = [];
+        $emptyRephrase = $this->serviceWithResolvedNeed(
+            $queries,
+            static fn(string $q, array $history): string => '',
+            0
+        );
+        $emptyResult = $emptyRephrase->handle($question, self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $this->assertSame([$question], $queries);
+        $this->assertStringContainsString('Q:' . $question, $this->chat->lastPrompt());
+        $this->assertSame($question, $emptyResult['question']);
+
+        $this->session = [];
+        $queries = [];
+        $rephraseCalls = 0;
+        $noHistory = $this->serviceWithResolvedNeed(
+            $queries,
+            static function (string $q, array $history) use (&$rephraseCalls): string {
+                $rephraseCalls++;
+                return self::RESOLVED_PASSWORD_NEED;
+            },
+            0
+        );
+        $noHistoryResult = $noHistory->handle($question, [], 'tabAAAAAAAA');
+        $this->assertSame(0, $rephraseCalls, 'a standalone turn without history does not invoke rephrasing');
+        $this->assertSame([$question], $queries);
+        $this->assertStringContainsString('Q:' . $question, $this->chat->lastPrompt());
+        $this->assertSame($question, $noHistoryResult['question']);
+    }
+
+    public function testNewTopicDoesNotReusePendingResolvedNeed(): void
+    {
+        $queries = [];
+        $rephraseCalls = 0;
+        $rephraser = static function (string $question, array $history) use (&$rephraseCalls): string {
+            $rephraseCalls++;
+            return self::RESOLVED_PASSWORD_NEED;
+        };
+        $this->chat->queue(
+            self::CLARIFY_REPLY,
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nThe coffee machine is descaled every Friday."
+        );
+        $service = $this->serviceWithResolvedNeed($queries, $rephraser, 0);
+
+        $first = $service->handle('How can I do that?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $newQuestion = 'When is the coffee machine descaled?';
+        $newTopic = $service->handle($newQuestion, [], 'tabAAAAAAAA', $first['pendingId']);
+
+        $this->assertSame(Outcome::ANSWER, $newTopic['outcome']);
+        $this->assertSame([self::RESOLVED_PASSWORD_NEED, $newQuestion], $queries);
+        $this->assertSame(1, $rephraseCalls, 'the new topic does not rephrase or inherit the pending need');
+        $this->assertStringContainsString('Q:' . $newQuestion, $this->chat->calls[1][0]['content']);
+        $this->assertStringNotContainsString(self::RESOLVED_PASSWORD_NEED, $this->chat->calls[1][0]['content']);
+    }
+
+    public function testRephrasedNeedIsRedactedBeforeGenerationAndPendingStorage(): void
+    {
+        $secret = 'packet3syntheticsecret';
+        $resolvedNeed = 'Reset my password. password is ' . $secret;
+        $queries = [];
+        $rephraser = static fn(string $question, array $history): string => $resolvedNeed;
+        $this->chat->queue("DECISION: CLARIFY\nQUESTION: Which account?");
+        $service = $this->serviceWithResolvedNeed($queries, $rephraser, 0);
+
+        $result = $service->handle('How can I do that?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $evidence = json_encode([$this->chat->calls, $this->session, $result, $queries]);
+
+        $this->assertSame(Outcome::CLARIFY, $result['outcome']);
+        $this->assertTrue($result['redacted']);
+        $this->assertNotSame('', $result['warning']);
+        $this->assertStringContainsString('password is ' . \dokuwiki\plugin\aichat\Conversation\SecretRedactor::MASK, $this->session['tabAAAAAAAA']['need']);
+        $this->assertStringNotContainsString($secret, $evidence);
+    }
+
+    public function testStoredResolvedNeedRemainsBoundedAcrossChoice(): void
+    {
+        $longNeed = 'Export ' . str_repeat('x', 1100);
+        $boundedNeed = mb_substr($longNeed, 0, PendingStore::MAX_NEED_LEN);
+        $chunks = [
+            new \dokuwiki\plugin\aichat\Chunk('it:ledger:export', 1, 'Ledger export procedure.', [], 'en', 1, 2),
+            new \dokuwiki\plugin\aichat\Chunk('it:vault:export', 2, 'Vault export procedure.', [], 'en', 1, 1),
+        ];
+        $retriever = static fn(string $query): array => $chunks;
+        $queries = [];
+        $rephraser = static fn(string $question, array $history): string => $longNeed;
+        $this->chat->queue(
+            "DECISION: CLARIFY\nQUESTION: Which destination?\nOPTION: Ledger | S1\nOPTION: Vault | S2",
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nUse Ledger."
+        );
+        $service = $this->serviceWithResolvedNeed($queries, $rephraser, 0, true, $retriever);
+
+        $first = $service->handle('Can I export it?', self::PASSWORD_HISTORY, 'tabAAAAAAAA');
+        $this->assertSame($boundedNeed, $this->session['tabAAAAAAAA']['need']);
+        $choice = $service->handle('Ledger', [], 'tabAAAAAAAA', $first['pendingId']);
+
+
+        $this->assertSame([$longNeed, $boundedNeed . ' (Ledger)'], $queries);
+        $this->assertCount(1, $this->chat->calls[1]);
+        $this->assertStringContainsString('Q:' . $boundedNeed . ' (Ledger)', $this->chat->calls[1][0]['content']);
+        $this->assertSame(['it:ledger:export'], array_map(
+            static fn($chunk) => $chunk->getPage(),
+            $choice['sources']
+        ));
     }
 }
