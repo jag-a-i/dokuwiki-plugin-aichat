@@ -71,3 +71,17 @@ $meta['preferUIlanguage'] = array('multichoice', '_choices' => array(
     \dokuwiki\plugin\aichat\AIChat::LANG_UI_ALL,
     \dokuwiki\plugin\aichat\AIChat::LANG_UI_LIMITED,
 ));
+
+$meta['feedback'] = array('onoff');
+$meta['diagnostics'] = array('onoff');
+$meta['diagnostics_retention'] = array('numeric', '_min' => 1, '_max' => 3650);
+$meta['telemetry'] = array('multichoice', '_choices' => array('off', 'langfuse', 'otlp'));
+$meta['telemetry_endpoint'] = array('string');
+$meta['telemetry_langfuse_public'] = array('string');
+$meta['telemetry_langfuse_secret'] = array('password');
+$meta['telemetry_otlp_authorization'] = array('password');
+$meta['telemetry_capture'] = array('multicheckbox', '_choices' => array('question', 'answer', 'context'));
+$meta['telemetry_timeout'] = array('numeric', '_min' => 1, '_max' => 10);
+$meta['telemetry_retries'] = array('numeric', '_min' => 0, '_max' => 2);
+$meta['telemetry_spool_max'] = array('numeric', '_min' => 0, '_max' => 10000);
+$meta['telemetry_spool_days'] = array('numeric', '_min' => 1, '_max' => 30);

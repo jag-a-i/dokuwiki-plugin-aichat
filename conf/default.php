@@ -60,3 +60,20 @@ $conf['skipRegex'] = ':(playground|sandbox)(:|$)';
 $conf['matchRegex'] = '';
 $conf['ignoreRegex'] = '';
 $conf['preferUIlanguage'] = 0;
+
+// response feedback and local metadata-only diagnostics
+$conf['feedback'] = 1;
+$conf['diagnostics'] = 1;
+$conf['diagnostics_retention'] = 30;
+
+// trace export (off by default; nothing is sent until configured)
+$conf['telemetry'] = 'off';
+$conf['telemetry_endpoint'] = '';
+$conf['telemetry_langfuse_public'] = '';
+$conf['telemetry_langfuse_secret'] = '';
+$conf['telemetry_otlp_authorization'] = '';
+$conf['telemetry_capture'] = '';
+$conf['telemetry_timeout'] = 2;
+$conf['telemetry_retries'] = 1;
+$conf['telemetry_spool_max'] = 100;
+$conf['telemetry_spool_days'] = 3;
