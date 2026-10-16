@@ -376,8 +376,8 @@ class ConversationService
                     $this->end($span, ['result' => 'clarify', 'options' => count($options)]);
                     return $this->clarifyResult($question, $conversation, $need, $options, $q, $rounds + 1, $correlation, $redacted);
                 }
-                if (!$decision['options'] && $this->cleanQuestion($decision['question'])) {
-                    // no menu possible: generic targeted question, no invented choices
+                if ($this->cleanQuestion($decision['question'])) {
+                    // An unusable menu must not discard a valid clarification question.
                     $this->end($span, ['result' => 'clarify_generic']);
                     return $this->clarifyResult(
                         $question, $conversation, $need, [], $this->cleanQuestion($decision['question']),
@@ -385,7 +385,7 @@ class ConversationService
                     );
                 }
             }
-            // clarification not allowed or not grounded (e.g. one system only): force a direct answer
+            // Clarification is disallowed, or neither a usable menu nor a question survived.
             $this->end($span, ['result' => 'forced_answer']);
             $prompt = ($this->promptBuilder)([
                 'context' => implode("\n\n", $context),

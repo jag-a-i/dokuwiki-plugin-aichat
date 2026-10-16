@@ -201,12 +201,76 @@ class ConversationTest extends \DokuWikiTest
         $this->chat->queue(
             // same system named twice ("E-mail account" normalizes to "e-mail"); a different alias such as
             // "Webmail" is NOT detectable in code and relies on the prompt (documented limitation)
-            "DECISION: CLARIFY\nQUESTION: Which?\nOPTION: E-Mail | S1, S4\nOPTION: E-mail account | S4",
-            "DECISION: ANSWER\nUSED: S1\nANSWER:\nOpen webmail settings."
+            "DECISION: CLARIFY\nQUESTION: Which?\nOPTION: E-Mail | S1, S4\nOPTION: E-mail account | S4"
         );
         $r = $this->ask('How do I change my email password?');
-        $this->assertSame(Outcome::ANSWER, $r['outcome']);
+        $this->assertSame(Outcome::CLARIFY, $r['outcome']);
+        $this->assertSame([], $r['options'], 'duplicate options do not make a menu');
+        $this->assertCount(1, $this->chat->calls, 'the question survives without a forced answer');
+    }
+
+    public function provideUnusableClarificationMenus(): array
+    {
+        return [
+            'observed Gemma reply with a non-source reference' => [
+                'OPTION: Agent Harness | Technical Systems',
+            ],
+            'all references absent from permitted context' => [
+                "OPTION: First | S98\nOPTION: Second | S99",
+            ],
+            'only one grounded option survives' => [
+                "OPTION: VPN | S2\nOPTION: Unknown | S99",
+            ],
+        ];
+    }
+
+    /** @dataProvider provideUnusableClarificationMenus */
+    public function testUnusableMenuPreservesQuestion(string $menu): void
+    {
+        $question = 'What are you referring to when you ask how to maintain it?';
+        $this->chat->queue("DECISION: CLARIFY\nQUESTION: {$question}\n{$menu}");
+        $result = $this->ask('How do I change my password?');
+
+        $this->assertSame(Outcome::CLARIFY, $result['outcome']);
+        $this->assertSame($question, $result['answer']);
+        $this->assertSame([], $result['options']);
+        $this->assertSame([], $result['sources']);
+        $this->assertNotSame('', $result['pendingId']);
+        $this->assertSame(1, $this->session['tabAAAAAAAA']['rounds']);
+        $this->assertCount(1, $this->chat->calls, 'no forced answer or repair call');
+
+        $this->chat->queue("DECISION: ANSWER\nUSED: S2\nANSWER:\nUse the VPN portal.");
+        $followup = $this->ask('VPN', 'tabAAAAAAAA', $result['pendingId']);
+        $this->assertSame(Outcome::ANSWER, $followup['outcome']);
+        $this->assertStringContainsString('How do I change my password? (VPN)', $this->chat->lastPrompt());
+    }
+
+    public function testUnusableMenuWithoutQuestionStillForcesAnswer(): void
+    {
+        $this->chat->queue(
+            "DECISION: CLARIFY\nOPTION: Unknown | S99",
+            "DECISION: ANSWER\nUSED: S1\nANSWER:\nOpen webmail settings."
+        );
+        $result = $this->ask('How do I change my email password?');
+        $this->assertSame(Outcome::ANSWER, $result['outcome']);
         $this->assertCount(2, $this->chat->calls);
+        $this->assertStringContainsString('CLARIFY:not allowed', $this->chat->lastPrompt());
+    }
+
+    public function testUnusableMenuDoesNotBypassClarificationLimit(): void
+    {
+        $reply = "DECISION: CLARIFY\nQUESTION: Which system?\nOPTION: Unknown | S99";
+        $this->chat->queue($reply, $reply, $reply, $reply);
+        $first = $this->ask('How do I change my password?');
+        $second = $this->ask('My other account', 'tabAAAAAAAA', $first['pendingId']);
+        $this->assertSame(Outcome::CLARIFY, $second['outcome']);
+        $this->assertSame(2, $this->session['tabAAAAAAAA']['rounds']);
+
+        $third = $this->ask('My work account', 'tabAAAAAAAA', $second['pendingId']);
+        $this->assertSame(Outcome::NOTICE, $third['outcome']);
+        $this->assertSame([], $third['options']);
+        $this->assertCount(4, $this->chat->calls);
+        $this->assertStringContainsString('CLARIFY:not allowed', $this->chat->lastPrompt());
     }
 
     // 7. ACL-denied alternatives never appear; revoked access respected on the next turn

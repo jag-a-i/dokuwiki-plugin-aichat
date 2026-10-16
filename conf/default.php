@@ -33,6 +33,7 @@ $conf['ollama_apikey'] = '';
 
 $conf['generic_apikey'] = '';
 $conf['generic_apiurl'] = '';
+$conf['generic_disable_thinking'] = 0;
 
 $conf['pinecone_apikey'] = '';
 $conf['pinecone_baseurl'] = '';

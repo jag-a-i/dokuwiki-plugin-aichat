@@ -40,6 +40,7 @@ $meta['ollama_apikey'] = array('string');
 
 $meta['generic_apikey'] = array('password');
 $meta['generic_apiurl'] = array('string');
+$meta['generic_disable_thinking'] = array('onoff');
 
 $meta['pinecone_apikey'] = array('password');
 $meta['pinecone_baseurl'] = array('string');

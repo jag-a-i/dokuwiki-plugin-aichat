@@ -24,6 +24,7 @@ $lang['ollama_apiurl'] = '🧠 <b>Ollama</b> base URL';
 $lang['ollama_apikey'] = '🧠 <b>Ollama</b> API key (optional)';
 $lang['generic_apikey'] = '🧠 <b>Generic</b> (OpenAI compatible) API key';
 $lang['generic_apiurl'] = '🧠 <b>Generic</b> (OpenAI compatible) API URL';
+$lang['generic_disable_thinking'] = '🧠 <b>Generic</b> Disable thinking for chat and rephrasing (requires an endpoint supporting chat_template_kwargs.enable_thinking, such as llama.cpp)';
 
 $lang['pinecone_apikey'] = '📥 <b>Pinecone</b> API key';
 $lang['pinecone_baseurl'] = '📥 <b>Pinecone</b> base URL';
