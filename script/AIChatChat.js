@@ -253,9 +253,24 @@ class AIChatChat extends HTMLElement {
      * Save history and conversation state to session storage (per browser tab)
      */
     saveHistory() {
-        sessionStorage.setItem('ai-chat-history', JSON.stringify(this.#history));
-        sessionStorage.setItem('ai-chat-conversation', this.#conversation);
-        sessionStorage.setItem('ai-chat-pending', this.#pending);
+        const keys = ['ai-chat-history', 'ai-chat-conversation', 'ai-chat-pending'];
+        const previous = keys.map(key => [key, sessionStorage.getItem(key)]);
+        try {
+            sessionStorage.setItem('ai-chat-history', JSON.stringify(this.#history));
+            sessionStorage.setItem('ai-chat-conversation', this.#conversation);
+            sessionStorage.setItem('ai-chat-pending', this.#pending);
+        } catch (error) {
+            // Keep the three persisted values in sync if storage rejects a write partway through.
+            for (const [key, value] of previous) {
+                try {
+                    if (value === null) sessionStorage.removeItem(key);
+                    else sessionStorage.setItem(key, value);
+                } catch (ignored) {
+                    // Best effort: preserve the original storage error for the caller.
+                }
+            }
+            throw error;
+        }
     }
 
     /**
@@ -328,6 +343,12 @@ class AIChatChat extends HTMLElement {
     async ask(message) {
         if (!message) return;
         this.removeOptions();
+        const previousState = {
+            history: this.#history.slice(),
+            conversation: this.#conversation,
+            pending: this.#pending,
+        };
+        let persistenceAttempted = false;
 
         // show original question for now
         const p = this.displayMessage(message);
@@ -337,23 +358,52 @@ class AIChatChat extends HTMLElement {
         try {
             const response = await this.sendMessage(message, this.getPageContext());
             const meta = (response.meta && typeof response.meta === 'object') ? response.meta : null;
+            if (meta && meta.outcome === 'ERROR') {
+                // The server returned a safe, localized error (including its correlation ID).
+                // Keep the submitted question and conversation state; an error is not model history.
+                this.displayMessage(response.answer, response.sources, meta, false);
+                return;
+            }
             if (meta) {
                 if (meta.conversationId) this.#conversation = meta.conversationId;
                 this.#pending = meta.pendingId || '';
             }
             this.#history.push([response.question, response.answer, response.sources, meta]);
+            persistenceAttempted = true;
             this.saveHistory();
             p.textContent = response.question; // replace original question with interpretation
             p.title = message; // show original question on hover
             this.displayMessage(response.answer, response.sources, meta, true); // display the answer
         } catch (e) {
-            console.error(e);
-            this.displayMessage(LANG.plugins.aichat.error, {});
+            // A failed render or storage write must not leave a turn that was never shown
+            // as conversation context for the next model request.
+            this.#history = previousState.history;
+            this.#conversation = previousState.conversation;
+            this.#pending = previousState.pending;
+            p.textContent = message;
+            p.title = '';
+            if (persistenceAttempted) {
+                try {
+                    this.saveHistory();
+                } catch (ignored) {
+                    // saveHistory rolls back partial writes; keep the client error visible.
+                }
+            }
+            const category = (e && typeof e.aichatCategory === 'string') ? e.aichatCategory : 'client';
+            const status = (e && Number.isInteger(e.status) && e.status >= 100 && e.status <= 599) ? e.status : null;
+            if (window.console && typeof console.warn === 'function') {
+                try {
+                    console.warn('AI Chat request failed', {category, status});
+                } catch (ignored) {
+                    // Console logging must not prevent the safe message from being displayed.
+                }
+            }
+            this.displayError(this.chatErrorMessage(category, status));
+        } finally {
+            this.stopProgress();
+            this.#input.focus();
+            p.scrollIntoView();
         }
-
-        this.stopProgress();
-        this.#input.focus();
-        p.scrollIntoView();
     }
 
     /**
@@ -499,6 +549,10 @@ class AIChatChat extends HTMLElement {
         const div = document.createElement('div');
         if(sources !== null) {
             div.classList.add('ai');
+            if (meta && meta.outcome === 'ERROR') {
+                div.setAttribute('role', 'alert');
+                div.setAttribute('aria-live', 'assertive');
+            }
             if (meta && meta.warning) {
                 const warn = document.createElement('p');
                 warn.classList.add('warning');
@@ -554,6 +608,73 @@ class AIChatChat extends HTMLElement {
     }
 
     /**
+     * Display a client-generated failure as plain text in an accessible AI message.
+     *
+     * @param {string} message
+     */
+    displayError(message) {
+        const div = document.createElement('div');
+        div.classList.add('ai');
+        div.setAttribute('role', 'alert');
+        div.setAttribute('aria-live', 'assertive');
+        div.textContent = message;
+        this.#output.appendChild(div);
+    }
+
+    /**
+     * Return the localized, safe message for a client-side request failure.
+     *
+     * @param {string} category
+     * @param {number|null} status
+     * @returns {string}
+     */
+    chatErrorMessage(category, status = null) {
+        const messages = {
+            timeout: ['error_timeout', 'The chat server took too long to respond (HTTP %s). Please wait a moment before trying again.'],
+            unavailable: ['error_unavailable', 'The chat service is temporarily unavailable (HTTP %s). Please try again later.'],
+            forbidden: ['error_forbidden', 'The chat request was not accepted (HTTP 403). Reload the page and try again.'],
+            http: ['error_http', 'The chat request failed (HTTP %s). Please try again later.'],
+            network: ['error_network', 'The chat request could not be completed. Check your connection and try again.'],
+            aborted: ['error_aborted', 'The chat request was interrupted. Please try again.'],
+            invalid_response: ['error_invalid_response', 'The chat server returned an invalid response. Reload the page and try again.'],
+            client: ['error_processing', 'The chat reply could not be displayed or saved. Reload the page and try again.'],
+        };
+        const [key, fallback] = messages[category] || messages.client;
+        const localized = window.LANG && window.LANG.plugins && window.LANG.plugins.aichat && window.LANG.plugins.aichat[key];
+        const message = (typeof localized === 'string' && localized) ? localized : fallback;
+        return message.replace('%s', status === null ? '' : String(status)).replace(/\s+\./g, '.');
+    }
+
+    /**
+     * Validate the JSON contract before it can mutate chat history or state.
+     * A missing meta object is accepted for older plugin responses.
+     *
+     * @param {*} response
+     * @returns {boolean}
+     */
+    isValidChatResponse(response) {
+        if (!response || typeof response !== 'object' || Array.isArray(response)) return false;
+        if (typeof response.question !== 'string' || typeof response.answer !== 'string' || !Array.isArray(response.sources)) return false;
+        if (!response.sources.every(source => source && typeof source === 'object' && !Array.isArray(source)
+            && typeof source.page === 'string' && typeof source.url === 'string'
+            && typeof source.title === 'string' && typeof source.score === 'string')) return false;
+        if (!Object.prototype.hasOwnProperty.call(response, 'meta')) return true;
+
+        const meta = response.meta;
+        if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+        if (!['ANSWER', 'CLARIFY', 'NO_INFORMATION', 'NOTICE', 'ERROR'].includes(meta.outcome)) return false;
+        if (meta.options !== undefined && (!Array.isArray(meta.options) || !meta.options.every(option => typeof option === 'string'))) return false;
+        for (const key of ['pendingId', 'conversationId', 'responseId', 'correlationId', 'warning']) {
+            if (meta[key] !== undefined && typeof meta[key] !== 'string') return false;
+        }
+        if (meta.correlationId && !/^[0-9a-f]{16}$/.test(meta.correlationId)) return false;
+        if (meta.outcome === 'ERROR' && !/^[0-9a-f]{16}$/.test(meta.correlationId || '')) return false;
+        if (meta.feedback !== undefined && typeof meta.feedback !== 'boolean') return false;
+        if (meta.outcome === 'CLARIFY' && meta.options === undefined) return false;
+        return true;
+    }
+
+    /**
      * Send a question to the server
      *
      * @param {string} message
@@ -564,18 +685,55 @@ class AIChatChat extends HTMLElement {
         const formData = new FormData();
         formData.append('question', message);
         // only the last few [question, answer] pairs are needed; the server treats them as untrusted context
-        formData.append('history', JSON.stringify(this.#history.slice(-6).map(row => [row[0], row[1]])));
+        const history = this.#history.filter(row => Array.isArray(row) && !(row[3] && row[3].outcome === 'ERROR'));
+        formData.append('history', JSON.stringify(history.slice(-6).map(row => [row[0], row[1]])));
         formData.append('pagecontext', pageContext);
         formData.append('conversation', this.#conversation);
         formData.append('pending', this.#pending);
         formData.append('sectok', (window.JSINFO && JSINFO.plugin_aichat && JSINFO.plugin_aichat.sectok) || '');
 
-        const response = await fetch(this.getAttribute('url') || '/', {
-            method: 'POST',
-            body: formData
-        });
+        let response;
+        try {
+            response = await fetch(this.getAttribute('url') || '/', {method: 'POST', body: formData});
+        } catch (error) {
+            const failure = new Error('AI Chat request failed');
+            failure.aichatCategory = error && error.name === 'AbortError' ? 'aborted' : 'network';
+            throw failure;
+        }
 
-        return await response.json();
+        let data;
+        try {
+            data = await response.json();
+        } catch (error) {
+            const failure = new Error('AI Chat response could not be parsed');
+            failure.aichatCategory = response.ok ? 'invalid_response' : this.httpErrorCategory(response.status);
+            failure.status = response.status;
+            throw failure;
+        }
+
+        // A valid safe backend error envelope (notably the CSRF 403) carries the
+        // localized message and reference ID that the user needs to keep.
+        if (this.isValidChatResponse(data) && data.meta && data.meta.outcome === 'ERROR') return data;
+        if (!response.ok) {
+            const failure = new Error('AI Chat request failed');
+            failure.aichatCategory = this.httpErrorCategory(response.status);
+            failure.status = response.status;
+            throw failure;
+        }
+        if (!this.isValidChatResponse(data)) {
+            const failure = new Error('AI Chat response did not match the plugin contract');
+            failure.aichatCategory = 'invalid_response';
+            throw failure;
+        }
+        return data;
+    }
+
+    /** @param {number} status */
+    httpErrorCategory(status) {
+        if (status === 504 || status === 408) return 'timeout';
+        if (status === 502 || status === 503) return 'unavailable';
+        if (status === 403) return 'forbidden';
+        return 'http';
     }
 }
 

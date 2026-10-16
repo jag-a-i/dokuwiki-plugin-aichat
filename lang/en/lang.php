@@ -15,6 +15,14 @@ $lang['close-button'] = 'Close';
 $lang['fullscreen-button'] = 'Toggle fullscreen';
 $lang['pagecontext'] = 'Enable to ask about the current page.';
 $lang['js']['error'] = 'Sorry, something went wrong';
+$lang['js']['error_timeout'] = 'The chat server took too long to respond (HTTP %s). Please wait a moment before trying again.';
+$lang['js']['error_unavailable'] = 'The chat service is temporarily unavailable (HTTP %s). Please try again later.';
+$lang['js']['error_forbidden'] = 'The chat request was not accepted (HTTP 403). Reload the page and try again.';
+$lang['js']['error_http'] = 'The chat request failed (HTTP %s). Please try again later.';
+$lang['js']['error_network'] = 'The chat request could not be completed. Check your connection and try again.';
+$lang['js']['error_aborted'] = 'The chat request was interrupted. Please try again.';
+$lang['js']['error_invalid_response'] = 'The chat server returned an invalid response. Reload the page and try again.';
+$lang['js']['error_processing'] = 'The chat reply could not be displayed or saved. Reload the page and try again.';
 
 $lang['error'] = 'Sorry, the AI chat service is currently unavailable. Please try again later. Reference: %s';
 $lang['sectok'] = 'Your session has expired. Please reload the page and try again. Reference: %s';

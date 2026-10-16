@@ -74,6 +74,11 @@ abstract class AbstractGenericModel extends AbstractModel
             'temperature' => 0.0
         ];
 
+        // Opt in only for compatible endpoints such as llama.cpp.
+        if ($this->getFromConf('disable_thinking', false)) {
+            $data['chat_template_kwargs'] = ['enable_thinking' => false];
+        }
+
         $response = $this->request('chat/completions', $data);
         return $response['choices'][0]['message']['content'];
     }
